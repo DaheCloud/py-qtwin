@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QApplication
 
+from paths import default_db_path
 from ui.main_window import MainWindow
 from ui.pages.settings_page import get_theme_choice, load_settings
 from ui.styles import apply_theme, make_app_icon, ui_font
@@ -18,9 +19,9 @@ def create_app() -> QApplication:
     return app
 
 
-def run_app(db_path: str = "data/app.db") -> int:
+def run_app(db_path: str | None = None) -> int:
     app = create_app()
-    window = MainWindow(db_path=db_path)
+    window = MainWindow(db_path=db_path or default_db_path())
     window.show()
     code = app.exec()
     # exec() 返回后窗口对象仍由 Python 持有；必须先停掉后台解析线程，

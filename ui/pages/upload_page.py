@@ -68,13 +68,14 @@ class _ParseWorker(QObject):
 
     def run(self) -> None:  # type: ignore[override]
         from database.db import get_engine, init_db, make_session_factory
+        from paths import templates_dir
         from pdf.template_engine import TemplateEngine
         from services.pdf_service import PdfService
 
         engine = get_engine(self._db_path)
         init_db(engine)
         factory = make_session_factory(engine)
-        service = PdfService(TemplateEngine("templates"))
+        service = PdfService(TemplateEngine(templates_dir()))
 
         while True:
             task = self._tasks.get()

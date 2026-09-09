@@ -16,6 +16,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from database.db import get_engine, init_db, make_session_factory
+from paths import default_db_path, templates_dir
 from pdf.template_engine import TemplateEngine
 from services.pdf_service import PdfService
 
@@ -25,7 +26,7 @@ def run_cli(args: argparse.Namespace) -> int:
     init_db(engine)
     factory = make_session_factory(engine)
 
-    engine_templates = TemplateEngine("templates")
+    engine_templates = TemplateEngine(templates_dir())
     service = PdfService(engine_templates)
 
     if not args.pdf:
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("pdf", nargs="?", help="要处理的 PDF 文件路径")
     parser.add_argument("--cli", action="store_true", help="使用命令行模式而不启动 GUI")
     parser.add_argument("--template", help="手动指定模板 ID（默认自动识别）")
-    parser.add_argument("--db", default="data/app.db", help="SQLite 路径")
+    parser.add_argument("--db", default=default_db_path(), help="SQLite 路径")
     args = parser.parse_args(argv)
 
     if args.cli:
