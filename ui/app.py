@@ -5,13 +5,14 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
-from ui.styles import STYLE_SHEET, make_app_icon, ui_font
+from ui.pages.settings_page import get_theme_choice, load_settings
+from ui.styles import apply_theme, make_app_icon, ui_font
 
 
 def create_app() -> QApplication:
-    """创建（或复用）QApplication，并应用全局主题。"""
+    """创建（或复用）QApplication，并按持久化设置应用主题。"""
     app = QApplication.instance() or QApplication([])
-    app.setStyleSheet(STYLE_SHEET)
+    apply_theme(app, get_theme_choice(load_settings()))
     app.setWindowIcon(make_app_icon())
     app.setFont(ui_font(10))
     return app

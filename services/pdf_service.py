@@ -88,14 +88,29 @@ class PdfService:
             )
         return reasons
 
-    def process_document(self, session: Session, pdf_path: str, template: dict[str, Any] | None = None) -> Document:
-        """完整处理一份 PDF；document + fields + verifications 同一事务。"""
+    def process_document(
+        self,
+        session: Session,
+        pdf_path: str,
+        template: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+    ) -> Document:
+        """完整处理一份 PDF；document + fields + verifications 同一事务。
+
+        force=True（手动覆盖查重）：同内容文件已导入时，删除旧记录（字段/验证
+        结果级联删除）后重新导入，而不是抛错。
+        """
         pdf_path = str(Path(pdf_path).resolve())
         file_hash = file_sha256(pdf_path)
 
         existing = session.query(Document).filter_by(file_hash=file_hash).one_or_none()
-        if existing:
-            raise ValueError(f"该 PDF 已经导入（document_id={existing.id}）：{Path(pdf_path).name}")
+        if existing is not None:
+            if not force:
+                raise ValueError(f"该 PDF 已经导入（document_id={existing.id}）：{Path(pdf_path).name}")
+            # 手动覆盖：旧数据随级联一起清除，保证 file_hash 唯一索引不冲突
+            session.delete(existing)
+            session.flush()
 
         if template is None:
             template = self.template_engine.detect(pdf_path)
@@ -126,14 +141,19 @@ class PdfService:
                 )
 
             mismatches = []
+            is_dynamic_template = template.get("mode") == "dynamic"
             verify_fields = {
                 name: spec
                 for name, spec in template.get("fields", {}).items()
                 if spec.get("verify") and report.fields.get(name) is not None
-                # 固定 rect 校验只对固定解析成功的字段有意义；
-                # 被动态兜底救回的字段走人工确认。
-                and report.fields[name].parser == "pymupdf"
                 and report.fields[name].valid
+                and (
+                    # 动态模板（发票等）：pdfplumber 独立切词跑同一锚点规则二次提取
+                    ("anchor" in spec if is_dynamic_template
+                     # 固定模板：rect 校验只对固定解析成功的字段有意义；
+                     # 被动态兜底救回的字段走人工确认。
+                     else report.fields[name].parser == "pymupdf" and "rect" in spec)
+                )
             }
             if report.valid and verify_fields:
                 vreport = self._validator.verify(

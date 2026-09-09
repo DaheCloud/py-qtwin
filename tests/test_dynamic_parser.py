@@ -14,7 +14,6 @@ import pymupdf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.db import get_engine, init_db, make_session_factory
-from pdf.template_engine import TemplateEngine
 from services.pdf_service import PdfService
 
 PAGE_W, PAGE_H = 595, 842
@@ -58,9 +57,8 @@ def shifted_pdf(tmp_path):
 
 
 @pytest.fixture
-def dynamic_template():
-    tpl = TemplateEngine("templates").get("contract_v1")
-    return {**tpl, "mode": "dynamic"}
+def dynamic_template(contract_template):
+    return {**contract_template, "mode": "dynamic"}
 
 
 @pytest.fixture
@@ -181,24 +179,24 @@ class TestDynamicRegionParser:
 # ------------------------------------------------------- 兜底流程集成
 
 class TestFallbackFlow:
-    def _service(self):
-        return PdfService(TemplateEngine("templates"))
+    def _service(self, contract_engine):
+        return PdfService(contract_engine)
 
-    def test_fixed_success_no_fallback(self, normal_pdf):
+    def test_fixed_success_no_fallback(self, normal_pdf, contract_engine):
         """固定解析全部成功 → 不触发兜底。"""
         engine = get_engine(":memory:")
         init_db(engine)
-        service = self._service()
+        service = self._service(contract_engine)
         with make_session_factory(engine)() as session:
             doc = service.process_document(session, normal_pdf)
             assert doc.status == "success"
             assert all(f.parser == "pymupdf" for f in doc.fields)
 
-    def test_fixed_fails_dynamic_rescues(self, shifted_pdf):
+    def test_fixed_fails_dynamic_rescues(self, shifted_pdf, contract_engine):
         """布局漂移：固定 rect 落空失败 → 锚点兜底救回 → manual_review/成功。"""
         engine = get_engine(":memory:")
         init_db(engine)
-        service = self._service()
+        service = self._service(contract_engine)
         with make_session_factory(engine)() as session:
             doc = service.process_document(session, shifted_pdf)
             parsers = {f.field_name: f.parser for f in doc.fields}
@@ -209,15 +207,16 @@ class TestFallbackFlow:
             assert parsers["amount"] == "pymupdf"
             assert doc.status in ("manual_review", "failed")
 
-    def test_dynamic_mode_template_direct(self, tmp_path, shifted_pdf):
+    def test_dynamic_mode_template_direct(self, shifted_pdf, contract_engine, contract_template):
         """mode=dynamic 的模板直接走动态解析，不经过固定。"""
         engine = get_engine(":memory:")
         init_db(engine)
-        service = self._service()
-        tpl = {**TemplateEngine("templates").get("contract_v1"), "mode": "dynamic"}
-        # 去掉无锚点字段，纯动态模板
+        service = self._service(contract_engine)
+        tpl = {**contract_template, "mode": "dynamic"}
+        # 去掉无锚点字段与 verify 标记，聚焦纯动态解析路径（交叉验证另有管线测试）
         tpl["fields"] = {
-            k: v for k, v in tpl["fields"].items() if "anchor" in v
+            k: {kk: vv for kk, vv in v.items() if kk != "verify"}
+            for k, v in tpl["fields"].items() if "anchor" in v
         }
         tpl["business_rules"] = []
         with make_session_factory(engine)() as session:

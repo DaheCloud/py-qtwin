@@ -13,7 +13,6 @@ import pymupdf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.db import get_engine, init_db, make_session_factory
-from pdf.template_engine import TemplateEngine
 from services.pdf_service import PdfService
 
 PAGE_W, PAGE_H = 595, 842
@@ -49,27 +48,27 @@ def _make_broken_pdf(path: Path) -> None:
     doc.close()
 
 
-def _service(tmp_path: Path) -> tuple[PdfService, object]:
+def _service(tmp_path: Path, template_engine) -> tuple[PdfService, object]:
     engine = get_engine(tmp_path / "t.db")
     init_db(engine)
     factory = make_session_factory(engine)
-    return PdfService(TemplateEngine("templates")), factory
+    return PdfService(template_engine), factory
 
 
-def test_success_has_no_error_reason(tmp_path):
+def test_success_has_no_error_reason(tmp_path, contract_engine):
     pdf = tmp_path / "good.pdf"
     _make_good_pdf(pdf)
-    service, factory = _service(tmp_path)
+    service, factory = _service(tmp_path, contract_engine)
     with factory() as session:
         doc = service.process_document(session, str(pdf), None)
         assert doc.status == "success"
         assert doc.error_reason is None
 
 
-def test_failed_document_collects_reasons(tmp_path):
+def test_failed_document_collects_reasons(tmp_path, contract_engine):
     pdf = tmp_path / "broken.pdf"
     _make_broken_pdf(pdf)
-    service, factory = _service(tmp_path)
+    service, factory = _service(tmp_path, contract_engine)
     with factory() as session:
         doc = service.process_document(session, str(pdf), None)
         assert doc.status in ("failed", "manual_review")
@@ -84,10 +83,10 @@ def test_failed_document_collects_reasons(tmp_path):
         assert "；" in text
 
 
-def test_duplicate_rejects_with_reason(tmp_path):
+def test_duplicate_rejects_with_reason(tmp_path, contract_engine):
     pdf = tmp_path / "dup.pdf"
     _make_good_pdf(pdf)
-    service, factory = _service(tmp_path)
+    service, factory = _service(tmp_path, contract_engine)
     with factory() as session:
         service.process_document(session, str(pdf), None)
     with factory() as session:

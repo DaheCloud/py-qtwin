@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -40,6 +41,7 @@ _STATUS_TO_KIND = {
 _ROW_ID = Qt.ItemDataRole.UserRole + 1
 _ROW_PATH = Qt.ItemDataRole.UserRole + 2
 _ROW_STATE = Qt.ItemDataRole.UserRole + 3  # uploading / parsing / done / failed
+_ROW_FORCE = Qt.ItemDataRole.UserRole + 4  # 覆盖导入（手动确认过查重）
 
 COL_NAME, COL_SIZE, COL_TIME, COL_PROGRESS, COL_STATUS, COL_ACTION = range(6)
 
@@ -56,10 +58,10 @@ class _ParseWorker(QObject):
     def __init__(self, db_path: str) -> None:
         super().__init__()
         self._db_path = db_path
-        self._tasks: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        self._tasks: queue.Queue[tuple[str, str, bool] | None] = queue.Queue()
 
-    def submit(self, row_id: str, pdf_path: str) -> None:
-        self._tasks.put((row_id, pdf_path))
+    def submit(self, row_id: str, pdf_path: str, force: bool = False) -> None:
+        self._tasks.put((row_id, pdf_path, force))
 
     def stop(self) -> None:
         self._tasks.put(None)
@@ -78,10 +80,10 @@ class _ParseWorker(QObject):
             task = self._tasks.get()
             if task is None:
                 return
-            row_id, pdf_path = task
+            row_id, pdf_path, force = task
             try:
                 with factory() as session:
-                    doc = service.process_document(session, pdf_path, None)
+                    doc = service.process_document(session, pdf_path, None, force=force)
                     reason = doc.error_reason or ("解析完成" if doc.status == "success" else "")
                     self.task_done.emit(row_id, doc.status, reason, int(doc.id))
             except Exception as exc:  # noqa: BLE001 — 后台线程兜底，错误回填到行
@@ -189,7 +191,7 @@ class UploadPage(QWidget):
         self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels(["文件名", "文件大小", "导入时间", "上传进度", "状态", "操作"])
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(36)  # 容纳按钮文字（YaHei 行高较高）
+        self._table.verticalHeader().setDefaultSectionSize(48)  # 容纳按钮文字（YaHei 行高较高）
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header = self._table.horizontalHeader()
@@ -220,13 +222,54 @@ class UploadPage(QWidget):
     def handle_paths(self, paths: list[str]) -> None:
         if not paths:
             return
+        normal, force_paths = self._split_duplicates(paths)
         import_time = _now_str()  # 与 JS 一致：本次添加动作统一时间
-        for path in paths:
+        force_set = set(force_paths)
+        for path in normal + force_paths:
             row_id = f"{datetime.now().timestamp():.6f}-{id(path)}"
-            self._add_row(row_id, path, import_time)
-        self._toast.show_message(f"已成功添加 {len(paths)} 个文件到队列")
+            self._add_row(row_id, path, import_time, force=path in force_set)
+        msg = f"已成功添加 {len(normal) + len(force_paths)} 个文件到队列"
+        if force_paths:
+            msg += f"（其中 {len(force_paths)} 个为覆盖导入）"
+        self._toast.show_message(msg)
         if not self._timer.isActive():
             self._timer.start()
+
+    def _split_duplicates(self, paths: list[str]) -> tuple[list[str], list[str]]:
+        """入库前主线程预检重复。
+
+        返回 (普通路径, 用户确认覆盖的路径)；用户拒绝覆盖的重复文件被剔除。
+        """
+        from database.db import get_engine, init_db, make_session_factory
+        from models.document import Document
+        from services.pdf_service import file_sha256
+
+        engine = get_engine(self._db_path)
+        init_db(engine)
+        factory = make_session_factory(engine)
+        normal, force_paths = [], []
+        with factory() as session:
+            for p in paths:
+                try:
+                    h = file_sha256(p)
+                except OSError:
+                    normal.append(p)  # 文件读不了，交由解析阶段报错
+                    continue
+                if session.query(Document).filter_by(file_hash=h).one_or_none() is not None:
+                    force_paths.append(p)
+                else:
+                    normal.append(p)
+        if force_paths:
+            names = "\n".join(f"· {Path(p).name}" for p in force_paths)
+            answer = QMessageBox.question(
+                self,
+                "发现重复文件",
+                f"以下 {len(force_paths)} 个文件已导入过：\n{names}\n\n"
+                "是否删除旧记录并重新导入？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return normal, []
+        return normal, force_paths
 
     # ------------------------------------------------------------- 私有
 
@@ -234,7 +277,7 @@ class UploadPage(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "选取 PDF 文件", "", "PDF 文件 (*.pdf)")
         self.handle_paths(paths)
 
-    def _add_row(self, row_id: str, path: str, import_time: str) -> None:
+    def _add_row(self, row_id: str, path: str, import_time: str, force: bool = False) -> None:
         r = self._table.rowCount()
         self._table.insertRow(r)
 
@@ -242,6 +285,7 @@ class UploadPage(QWidget):
         name_item.setData(_ROW_ID, row_id)
         name_item.setData(_ROW_PATH, path)
         name_item.setData(_ROW_STATE, "uploading")
+        name_item.setData(_ROW_FORCE, force)
         name_item.setToolTip(path)
         self._table.setItem(r, COL_NAME, name_item)
 
@@ -300,7 +344,7 @@ class UploadPage(QWidget):
                 self._table.item(r, COL_PROGRESS).setData(Qt.ItemDataRole.UserRole, 100)
                 name_item.setData(_ROW_STATE, "parsing")
                 self._set_status(r, "info", "解析中...")
-                self._submit_parse(row_id, name_item.data(_ROW_PATH))
+                self._submit_parse(row_id, name_item.data(_ROW_PATH), bool(name_item.data(_ROW_FORCE)))
             else:
                 self._table.item(r, COL_PROGRESS).setData(Qt.ItemDataRole.UserRole, progress)
         if not active:
@@ -310,9 +354,9 @@ class UploadPage(QWidget):
         value = self._table.item(row, COL_PROGRESS).data(Qt.ItemDataRole.UserRole)
         return int(value or 0)
 
-    def _submit_parse(self, row_id: str, path: str) -> None:
+    def _submit_parse(self, row_id: str, path: str, force: bool = False) -> None:
         if self._worker is not None:
-            self._worker.submit(row_id, path)
+            self._worker.submit(row_id, path, force)
 
     def _on_parse_done(self, row_id: str, status: str, reason: str, document_id: int) -> None:
         row = self._find_row(row_id)

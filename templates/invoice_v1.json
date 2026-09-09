@@ -1,0 +1,136 @@
+{
+  "template": "invoice_v1",
+  "mode": "dynamic",
+  "detect": [
+    "电子发票",
+    "增值税专用发票"
+  ],
+  "fields": {
+    "invoice_no": {
+      "page": 0,
+      "anchor": "发票号码",
+      "direction": "right",
+      "type": "string",
+      "pattern": "^\\d{8,20}$",
+      "verify": true
+    },
+    "invoice_date": {
+      "page": 0,
+      "anchor": "开票日期",
+      "direction": "right",
+      "type": "date",
+      "verify": true
+    },
+    "buyer_name": {
+      "page": 0,
+      "anchor": "名称：",
+      "direction": "right",
+      "x_max": 300,
+      "type": "string",
+      "pattern": "^[^：:]{4,}$",
+      "verify": true
+    },
+    "buyer_tax_no": {
+      "page": 0,
+      "anchor": "纳税人识别号",
+      "direction": "right",
+      "x_max": 300,
+      "type": "string",
+      "pattern": "^[0-9A-Z]{15,20}$",
+      "verify": true
+    },
+    "seller_name": {
+      "page": 0,
+      "anchor": "名称：",
+      "direction": "right",
+      "x_min": 300,
+      "type": "string",
+      "pattern": "^[^：:]{4,}$",
+      "verify": true
+    },
+    "seller_tax_no": {
+      "page": 0,
+      "anchor": "纳税人识别号",
+      "direction": "right",
+      "x_min": 300,
+      "type": "string",
+      "pattern": "^[0-9A-Z]{15,20}$",
+      "verify": true
+    },
+    "item_name": {
+      "page": 0,
+      "anchor": "项目名称",
+      "direction": "below",
+      "max_distance": 30,
+      "type": "string",
+      "pattern": "^\\*.+\\*.+$",
+      "verify": true
+    },
+    "construction_site": {
+      "page": 0,
+      "anchor": "建筑服务发生地",
+      "direction": "below",
+      "max_distance": 30,
+      "below_mode": "merge",
+      "type": "string",
+      "verify": true
+    },
+    "project_name": {
+      "page": 0,
+      "anchor": "建筑项目名称",
+      "direction": "below",
+      "max_distance": 30,
+      "below_mode": "merge",
+      "type": "string",
+      "verify": true
+    },
+    "tax_rate": {
+      "page": 0,
+      "anchor": "税率/征收率",
+      "direction": "below",
+      "max_distance": 30,
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+)?%$",
+      "verify": true
+    },
+    "total_amount": {
+      "page": 0,
+      "anchor": "（小写）",
+      "direction": "right",
+      "type": "decimal",
+      "pattern": "^[¥￥][\\d,]+\\.\\d{2}$",
+      "verify": true
+    },
+    "amount": {
+      "page": 0,
+      "anchor": "金",
+      "direction": "below",
+      "max_distance": 110,
+      "below_mode": "each",
+      "type": "decimal",
+      "pattern": "^[¥￥][\\d,]+\\.\\d{2}$",
+      "verify": true
+    },
+    "tax_amount": {
+      "page": 0,
+      "anchor": "税",
+      "direction": "below",
+      "max_distance": 110,
+      "below_mode": "each",
+      "type": "decimal",
+      "pattern": "^[¥￥][\\d,]+\\.\\d{2}$",
+      "verify": true
+    }
+  },
+  "business_rules": [
+    {
+      "field": "buyer_name",
+      "op": "not_empty"
+    },
+    {
+      "field": "total_amount",
+      "op": ">=",
+      "value": "0"
+    }
+  ]
+}

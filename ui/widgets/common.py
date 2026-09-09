@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.styles import ACCENT, BORDER, SIDEBAR_BG, ui_font
+from ui.styles import token, ui_font
 
 
 class Toast(QLabel):
@@ -86,13 +86,13 @@ class CopyCellDelegate(QStyledItemDelegate):
 
 class BadgeDelegate(QStyledItemDelegate):
     """表格内圆角徽章（对应 .badge-*）；数据取 ItemDataRole.UserRole 存的 kind，
-    显示文本取 DisplayRole。"""
+    显示文本取 DisplayRole。颜色按当前主题运行时取值。"""
 
     _KINDS = {
-        "success": ("#dcfce7", "#15803d"),
-        "info": ("#dbeafe", "#1e40af"),
-        "warning": ("#fef3c7", "#b45309"),
-        "failed": ("#fee2e2", "#b91c1c"),
+        "success": ("GREEN_BG", "GREEN_TEXT"),
+        "info": ("ACCENT_LIGHT", "INFO_TEXT"),
+        "warning": ("AMBER_BG", "AMBER_TEXT"),
+        "failed": ("RED_BG", "RED_TEXT"),
     }
 
     def paint(self, painter: QPainter, option, index) -> None:
@@ -100,7 +100,8 @@ class BadgeDelegate(QStyledItemDelegate):
         if kind not in self._KINDS:
             super().paint(painter, option, index)
             return
-        bg, fg = self._KINDS[kind]
+        bg_key, fg_key = self._KINDS[kind]
+        bg, fg = token(bg_key), token(fg_key)
         text = index.data() or ""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -136,10 +137,10 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = option.rect.adjusted(4, option.rect.height() // 2 - 3, -4, -option.rect.height() // 2 + 3)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(BORDER))
+        painter.setBrush(QColor(token("BORDER")))
         painter.drawRoundedRect(QRectF(rect), 3, 3)
         if value > 0:
             w = rect.width() * min(100, int(value)) / 100.0
-            painter.setBrush(QColor(ACCENT))
+            painter.setBrush(QColor(token("ACCENT")))
             painter.drawRoundedRect(QRectF(rect.left(), rect.top(), w, rect.height()), 3, 3)
         painter.restore()

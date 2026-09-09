@@ -13,7 +13,6 @@ import pymupdf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.db import get_engine, init_db, make_session_factory
-from pdf.template_engine import TemplateEngine
 from pdf.validators import FieldResult, validate_business_rules, validate_field
 from services.pdf_service import PdfService, file_sha256
 
@@ -25,7 +24,7 @@ def _make_pdf(path: Path) -> None:
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
     # china-s：内置中文字体；默认 Helvetica 无法编码中文
     page.insert_text((80, 60), "销售合同", fontsize=20, fontname="china-s")
-    # 与 templates/contract_v1.json 的 rect 对齐（插入点为文字基线，rect 上边需留出字高）
+    # 与 tests/fixtures/contract_v1.json 的 rect 对齐（插入点为文字基线，rect 上边需留出字高）
     # 标签在 x=80，值在 x=165 —— 值单独落在 rect 内，模拟真实版式
     page.insert_text((80, 120), "合同编号：", fontsize=12, fontname="china-s")
     page.insert_text((165, 120), "HT20260901", fontsize=12)  # contract_no rect (165,100,320,130)
@@ -37,11 +36,11 @@ def _make_pdf(path: Path) -> None:
     doc.close()
 
 
-def test_fixed_region_parse_and_cross_verify(tmp_path):
+def test_fixed_region_parse_and_cross_verify(tmp_path, contract_engine):
     pdf_path = tmp_path / "contract001.pdf"
     _make_pdf(pdf_path)
 
-    engine = TemplateEngine("templates")
+    engine = contract_engine
     tpl = engine.detect(str(pdf_path))
     assert tpl is not None, "模板识别失败"
     assert tpl["template"] == "contract_v1"
@@ -74,7 +73,7 @@ def test_business_rules(tmp_path):
     assert validate_business_rules(fields, rules) == []
 
 
-def test_service_persists_in_transaction(tmp_path, monkeypatch):
+def test_service_persists_in_transaction(tmp_path, monkeypatch, contract_engine):
     # 每个测试用独立 SQLite 文件
     db_path = tmp_path / "app.db"
     engine = get_engine(db_path)
@@ -84,7 +83,7 @@ def test_service_persists_in_transaction(tmp_path, monkeypatch):
     pdf_path = tmp_path / "contract002.pdf"
     _make_pdf(pdf_path)
 
-    service = PdfService(TemplateEngine("templates"))
+    service = PdfService(contract_engine)
     with factory() as session:
         doc = service.process_document(session, str(pdf_path))
         assert doc.status == "success"

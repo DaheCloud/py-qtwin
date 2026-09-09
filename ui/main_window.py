@@ -68,6 +68,8 @@ class MainWindow(QMainWindow):
         from ui.pages.detail_dialog import DetailDialog
 
         dialog = DetailDialog(self._db_path, doc_id, file_name, self)
+        # 人工确认后刷新筛选页，状态徽章即时更新
+        dialog.document_confirmed.connect(lambda _doc_id: self._filter_page.reload())
         dialog.exec()
 
     # ------------------------------------------------------------------

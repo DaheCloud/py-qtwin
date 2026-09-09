@@ -9,7 +9,16 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal, QSize
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QPen,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -29,7 +38,31 @@ from PySide6.QtWidgets import (
 from ui.styles import STATUS_BADGE_CLASS, ui_font
 from ui.widgets.common import BadgeDelegate, CopyCellDelegate, Toast
 
-COL_CHECK, COL_NAME, COL_CODE, COL_DATE, COL_AMOUNT, COL_STATUS, COL_ACTION = range(7)
+# 数据列定义：(表头, 主字段, 回退字段(旧合同数据兼容), 默认宽度, 是否金额列)
+DATA_COLUMNS: list[tuple[str, str, str | None, int, bool]] = [
+    ("发票号码", "invoice_no", "contract_no", 150, False),
+    ("开票日期", "invoice_date", "sign_date", 100, False),
+    ("购买方名称", "buyer_name", "customer_name", 150, False),
+    ("购买方税号", "buyer_tax_no", None, 160, False),
+    ("销售方名称", "seller_name", None, 150, False),
+    ("销售方税号", "seller_tax_no", None, 160, False),
+    ("项目名称", "item_name", None, 180, False),
+    ("建筑服务发生地", "construction_site", None, 180, False),
+    ("建筑项目名称", "project_name", None, 180, False),
+    ("税率", "tax_rate", None, 55, False),
+    ("金额", "amount", None, 100, True),
+    ("税额", "tax_amount", None, 90, True),
+    ("价税合计", "total_amount", None, 100, True),
+]
+COL_CHECK, COL_NAME = 0, 1
+COL_DATA_START = 2
+COL_STATUS = COL_DATA_START + len(DATA_COLUMNS)
+TOTAL_COLS = COL_STATUS + 1
+# 操作列作为右侧冻结面板（独立表格，不随主表横向滚动）
+ACTION_COL_WIDTH = 190
+
+_KEY_HIDDEN_COLS = "filter/hidden_columns"
+_KEY_AUTO_FIT = "filter/auto_fit_columns"
 
 _STATUS_TEXT = {
     "success": "准确",
@@ -42,6 +75,35 @@ _STATUS_TO_KIND = {"success": "success", "manual_review": "warning", "warning": 
 
 def _status_text(status: str) -> str:
     return _STATUS_TEXT.get(status, status)
+
+
+def _check_icon(checked: bool) -> QIcon:
+    """自绘勾选图标：未选灰框白底；选中蓝底白勾（完全自绘，不受系统控件渲染影响）。
+
+    图形四周留足 2px 透明边距，DPI 缩放重采样时也不会切到边框。
+    """
+    size = 16
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    rect = QRectF(2, 2, size - 4, size - 4)
+    if checked:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#2563eb"))
+        p.drawRoundedRect(rect, 4, 4)
+        pen = QPen(QColor("#ffffff"), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawLine(QPointF(4.5, 8.5), QPointF(7, 11))
+        p.drawLine(QPointF(7, 11), QPointF(11.5, 5))
+    else:
+        p.setPen(QPen(QColor("#94a3b8"), 1))
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(rect, 4, 4)
+    p.end()
+    return QIcon(pm)
 
 
 class FilterPage(QWidget):
@@ -64,7 +126,7 @@ class FilterPage(QWidget):
         bar_l = QHBoxLayout(bar)
         bar_l.setContentsMargins(16, 14, 16, 14)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索文件名/合同编号...")
+        self._search.setPlaceholderText("搜索文件名 / 任意识别字段...")
         self._search.setFixedWidth(220)
         self._search.returnPressed.connect(self.reload)
         bar_l.addWidget(self._search)
@@ -94,38 +156,99 @@ class FilterPage(QWidget):
         export_btn.setProperty("cssClass", "btn-success")
         export_btn.clicked.connect(self._export_selected)
         head.addWidget(export_btn)
+        self._cols_combo = self._build_cols_combo()
+        head.addWidget(self._cols_combo)
+        self._auto_fit_btn = QPushButton("自适应列宽：关")
+        self._auto_fit_btn.setCheckable(True)
+        self._auto_fit_btn.setProperty("cssClass", "btn-auto-fit")
+        self._auto_fit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._auto_fit_btn.setChecked(self._auto_fit_enabled())
+        self._auto_fit_btn.toggled.connect(self._toggle_auto_fit)
+        head.addWidget(self._auto_fit_btn)
         head.addStretch(1)
         self._select_count_label = QLabel()
         self._select_count_label.setObjectName("MutedText")
         head.addWidget(self._select_count_label)
         card_l.addLayout(head)
 
-        self._table = QTableWidget(0, 7)
+        self._table = QTableWidget(0, TOTAL_COLS)
         self._table.setHorizontalHeaderLabels(
-            ["", "文件名", "合同编号", "开票日期", "金额", "状态", "操作"]
+            ["", "文件名", *[c[0] for c in DATA_COLUMNS], "状态"]
         )
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(36)  # 容纳行内按钮文字
+        self._table.verticalHeader().setDefaultSectionSize(48)  # 与上传页行高统一
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header = self._table.horizontalHeader()
         header.setMinimumSectionSize(40)
         header.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.Fixed)
         self._table.setColumnWidth(COL_CHECK, 40)
-        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        # Interactive：默认宽度合理，且用户可拖动列边界自行调整
-        for col, width in ((COL_CODE, 150), (COL_DATE, 120), (COL_AMOUNT, 120), (COL_STATUS, 110), (COL_ACTION, 190)):
+        # 文件名列也固定宽，不自动拉伸——列宽完全手动控制
+        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(COL_NAME, 220)
+        # 数据列 Interactive：默认宽度合理，且用户可拖动列边界自行调整
+        for i, (_, _, _, width, _) in enumerate(DATA_COLUMNS):
+            col = COL_DATA_START + i
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self._table.setColumnWidth(col, width)
+        header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(COL_STATUS, 100)
+
+        # 操作列：右侧冻结面板，主表横向滚动时保持可见
+        self._action_table = QTableWidget(0, 1)
+        self._action_table.setHorizontalHeaderLabels(["操作"])
+        self._action_table.setObjectName("ActionTable")
+        self._action_table.verticalHeader().setVisible(False)
+        self._action_table.verticalHeader().setDefaultSectionSize(48)
+        self._action_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._action_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._action_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._action_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._action_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._action_table.setColumnWidth(0, ACTION_COL_WIDTH)
+        # 固定面板总宽 = 列宽，否则布局会把表格拉宽、列右侧多出一片空白
+        self._action_table.setFixedWidth(ACTION_COL_WIDTH)
+        action_header = self._action_table.horizontalHeader()
+        action_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        # 主表垂直滚动 → 冻结面板同步；主表选行 → 面板高亮同步
+        self._table.verticalScrollBar().valueChanged.connect(
+            self._action_table.verticalScrollBar().setValue
+        )
+        self._table.currentCellChanged.connect(
+            lambda cr, _cc, _pr, _pc: self._action_table.selectRow(cr) if cr >= 0 else None
+        )
 
         self._copy_delegate = CopyCellDelegate(self._table)
         self._copy_delegate.cell_copied.connect(lambda t: self._toast.show_message(f"已复制：{t}"))
-        for col in (COL_NAME, COL_CODE, COL_DATE, COL_AMOUNT):
+        for col in range(COL_NAME, COL_DATA_START + len(DATA_COLUMNS)):
             self._table.setItemDelegateForColumn(col, self._copy_delegate)
         self._table.setItemDelegateForColumn(COL_STATUS, BadgeDelegate(self._table))
-        card_l.addWidget(self._table, 1)
+
+        table_area = QWidget()
+        table_area_l = QHBoxLayout(table_area)
+        table_area_l.setContentsMargins(0, 0, 0, 0)
+        table_area_l.setSpacing(0)
+        table_area_l.addWidget(self._table, 1)
+        table_area_l.addWidget(self._action_table)
+        card_l.addWidget(table_area, 1)
         root.addWidget(card, 1)
 
+        # ---- 表头全选框（叠加在勾选列表头中央，自绘样式）
+        self._select_all_btn = QPushButton()
+        self._select_all_btn.setCheckable(True)
+        self._select_all_btn.setProperty("cssClass", "row-check")
+        self._select_all_btn.setFixedSize(18, 18)
+        self._select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._select_all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._select_all_btn.setToolTip("全选 / 取消全选")
+        self._select_all_btn.toggled.connect(self._select_all_rows)
+        self._select_all_btn.setParent(self._table.horizontalHeader())
+        self._select_all_btn.show()
+        header.sectionResized.connect(lambda *_: self._position_select_all())
+        self._table.horizontalScrollBar().valueChanged.connect(lambda *_: self._position_select_all())
+        self._position_select_all()
+
+        self._apply_hidden_columns()  # 恢复上次的列显示设置
         self.reload()
 
     # ------------------------------------------------------------- 数据加载
@@ -142,6 +265,8 @@ class FilterPage(QWidget):
         factory = make_session_factory(engine)
 
         keyword = self._search.text().strip()
+        # 多关键词（空格分隔）全部命中才显示；金额关键词自动兼容 ￥/¥ 符号
+        keywords = [k.lower().replace("￥", "").replace("¥", "") for k in keyword.split()] if keyword else []
         status = self._status_filter.currentData()
 
         with factory() as session:
@@ -149,20 +274,25 @@ class FilterPage(QWidget):
             docs = list(session.scalars(stmt))
             rows = []
             for doc in docs:
-                if keyword and keyword.lower() not in doc.file_name.lower():
-                    fields = {f.field_name: f.normalized_value for f in doc.fields}
-                    if not any(keyword.lower() in str(v).lower() for v in fields.values()):
+                fields = {f.field_name: f.normalized_value for f in doc.fields}
+                if keywords:
+                    hay = doc.file_name.lower() + "\n" + "\n".join(
+                        str(v).lower() for v in fields.values() if v
+                    )
+                    if not all(k in hay for k in keywords):
                         continue
                 if status == "review" and doc.status not in ("manual_review", "warning"):
                     continue
                 if status and status != "review" and doc.status != status:
                     continue
-                fields = {f.field_name: f.normalized_value for f in doc.fields}
                 rows.append((doc.id, doc.file_name, fields))
 
         self._table.setRowCount(0)
+        self._action_table.setRowCount(0)
         for doc_id, file_name, fields in rows:
             self._append_row(doc_id, file_name, fields)
+        if self._auto_fit_enabled():
+            self._auto_fit_columns()  # 开关开启时：数据刷新后按内容自动调整列宽
         self._update_select_count()
         if not rows:
             self._toast.show_message("没有符合条件的数据")
@@ -171,21 +301,35 @@ class FilterPage(QWidget):
         r = self._table.rowCount()
         self._table.insertRow(r)
 
-        check = QTableWidgetItem()
-        check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        check.setCheckState(Qt.CheckState.Unchecked)
-        self._table.setItem(r, COL_CHECK, check)
+        # 勾选：透明按钮铺满整格 + 居中自绘图标（图标绘制在按钮中心，绝不会被裁剪）
+        check_btn = QPushButton()
+        check_btn.setCheckable(True)
+        check_btn.setProperty("cssClass", "row-check-icon")
+        check_btn.setFlat(True)
+        check_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        check_btn.setIcon(_check_icon(False))
+        check_btn.setIconSize(QSize(16, 16))
+        check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        check_btn.toggled.connect(lambda on, b=check_btn: b.setIcon(_check_icon(on)))
+        self._table.setCellWidget(r, COL_CHECK, check_btn)
 
         self._table.setItem(r, COL_NAME, QTableWidgetItem(file_name))
-        self._table.setItem(r, COL_CODE, QTableWidgetItem(str(fields.get("contract_no") or "—")))
-        self._table.setItem(r, COL_DATE, QTableWidgetItem(str(fields.get("sign_date") or "—")))
-        amount = fields.get("amount")
-        self._table.setItem(r, COL_AMOUNT, QTableWidgetItem(f"￥{amount}" if amount else "—"))
         self._table.item(r, COL_NAME).setData(Qt.ItemDataRole.UserRole, doc_id)
+        # 全部识别字段列；主字段缺失时回退旧合同字段
+        for i, (_, key, fallback, _, is_money) in enumerate(DATA_COLUMNS):
+            col = COL_DATA_START + i
+            v = fields.get(key) or (fields.get(fallback) if fallback else None)
+            text = f"￥{v}" if (v and is_money) else (str(v) if v not in (None, "") else "—")
+            item = QTableWidgetItem(text)
+            item.setToolTip(text)  # 列宽不足时悬停查看完整内容
+            self._table.setItem(r, col, item)
 
         status_item = QTableWidgetItem(_status_text("success"))
         self._table.setItem(r, COL_STATUS, status_item)
 
+        # 操作按钮写入右侧冻结面板（与主表行号一一对应）
+        ar = self._action_table.rowCount()
+        self._action_table.insertRow(ar)
         actions = QWidget()
         a_l = QHBoxLayout(actions)
         a_l.setContentsMargins(4, 2, 4, 2)
@@ -197,13 +341,14 @@ class FilterPage(QWidget):
         ):
             btn = QPushButton(text)
             btn.setProperty("cssClass", cls)
-            btn.setFixedHeight(24)
+            btn.setFixedHeight(32)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, rr=r: handler(rr))
+            # handler/r 均通过默认参数绑定，避免闭包共享循环变量导致全部执行删除
+            btn.clicked.connect(lambda _=False, rr=r, h=handler: h(rr))
             a_l.addWidget(btn)
-        self._table.setCellWidget(r, COL_ACTION, actions)
-        actions.setFixedHeight(28)
-        actions.move(actions.x(), max(0, (self._table.rowHeight(r) - 28) // 2))
+        self._action_table.setCellWidget(ar, 0, actions)
+        actions.setFixedHeight(36)
+        actions.move(actions.x(), max(0, (self._action_table.rowHeight(ar) - 36) // 2))
         self._refresh_row_status(r)
 
     def _refresh_row_status(self, row: int) -> None:
@@ -230,10 +375,146 @@ class FilterPage(QWidget):
 
     # ------------------------------------------------------------- 行为
 
+    def _position_select_all(self) -> None:
+        """把全选框定位到勾选列表头的中央（随横向滚动移动）。"""
+        header = self._table.horizontalHeader()
+        x = self._table.columnViewportPosition(COL_CHECK) + self._table.columnWidth(COL_CHECK) // 2 - 10
+        self._select_all_btn.move(max(2, x), max(2, (header.height() - 20) // 2))
+
+    def _select_all_rows(self, checked: bool) -> None:
+        """全选 / 取消全选。"""
+        for r in range(self._table.rowCount()):
+            btn = self._table.cellWidget(r, COL_CHECK)
+            if isinstance(btn, QPushButton):
+                btn.setChecked(checked)
+
+    # ------------------------------------------------------------- 列显示控制
+
+    def _auto_fit_enabled(self) -> bool:
+        """自适应列宽开关状态（持久化，默认关闭）。"""
+        from PySide6.QtCore import QSettings
+
+        return QSettings("pdf-project", "pdf-structure-recognition").value(
+            _KEY_AUTO_FIT, False, type=bool
+        )
+
+    def _sync_auto_fit_btn(self) -> None:
+        self._auto_fit_btn.setText("自适应列宽：开" if self._auto_fit_btn.isChecked() else "自适应列宽：关")
+
+    def _toggle_auto_fit(self, checked: bool) -> None:
+        """切换自适应开关：开启时立即执行一次自适应，状态持久化。"""
+        from PySide6.QtCore import QSettings
+
+        QSettings("pdf-project", "pdf-structure-recognition").setValue(_KEY_AUTO_FIT, checked)
+        self._sync_auto_fit_btn()
+        if checked:
+            self._auto_fit_columns()
+            self._toast.show_message("已开启：数据刷新时自动按内容调整列宽")
+        else:
+            self._toast.show_message("已关闭：列宽完全手动控制")
+
+    def _auto_fit_columns(self) -> None:
+        """所有可见数据列按内容自适应宽度，并留出单元格内边距余量。"""
+        for i in range(len(DATA_COLUMNS)):
+            col = COL_DATA_START + i
+            if self._table.isColumnHidden(col):
+                continue
+            self._table.resizeColumnToContents(col)
+            self._table.setColumnWidth(col, self._table.columnWidth(col) + 20)
+
+    def _hidden_columns(self) -> set[str]:
+        """读取持久化的隐藏列（字段名集合）。"""
+        from PySide6.QtCore import QSettings
+
+        raw = str(QSettings("pdf-project", "pdf-structure-recognition").value(_KEY_HIDDEN_COLS, ""))
+        return {s for s in raw.split(",") if s}
+
+    def _save_hidden_columns(self, hidden: set[str]) -> None:
+        from PySide6.QtCore import QSettings
+
+        QSettings("pdf-project", "pdf-structure-recognition").setValue(
+            _KEY_HIDDEN_COLS, ",".join(sorted(hidden))
+        )
+
+    def _apply_hidden_columns(self) -> None:
+        """启动时按持久化设置隐藏列。"""
+        hidden = self._hidden_columns()
+        for i, (_, key, _, _, _) in enumerate(DATA_COLUMNS):
+            self._table.setColumnHidden(COL_DATA_START + i, key in hidden)
+
+    def _build_cols_combo(self) -> QComboBox:
+        """多选下拉：展开后连续勾选多项（下拉不收起），选择即时生效并持久化。"""
+        combo = QComboBox()
+        self._cols_combo = combo  # 尽早绑定，构建过程中的事件/文本刷新可用
+        combo.setObjectName("ColsSelect")
+        self._cols_model = QStandardItemModel(combo)
+        hidden = self._hidden_columns()
+        all_item = QStandardItem("全部显示")
+        all_item.setCheckable(False)
+        all_item.setEditable(False)
+        self._cols_model.appendRow(all_item)
+        for title, key, _, _, _ in DATA_COLUMNS:
+            item = QStandardItem(title)
+            item.setCheckable(True)
+            item.setEditable(False)
+            item.setCheckState(Qt.CheckState.Unchecked if key in hidden else Qt.CheckState.Checked)
+            self._cols_model.appendRow(item)
+        combo.setModel(self._cols_model)
+        combo.setCurrentIndex(-1)
+        combo.view().viewport().installEventFilter(self)
+        self._refresh_cols_text()
+        return combo
+
+    def _refresh_cols_text(self) -> None:
+        """按下拉里各列的勾选状态刷新显示文本（不依赖表格）。"""
+        visible_n = sum(
+            1
+            for i in range(len(DATA_COLUMNS))
+            if self._cols_model.item(i + 1).checkState() == Qt.CheckState.Checked
+        )
+        self._cols_combo.setPlaceholderText(f"显示列 ({visible_n}/{len(DATA_COLUMNS)})")
+
+    def eventFilter(self, obj, event) -> bool:
+        """勾选列表项鼠标松开时切换勾选，并吞掉该事件使下拉保持展开。"""
+        combo = getattr(self, "_cols_combo", None)
+        if combo is None or obj is not combo.view().viewport():
+            return super().eventFilter(obj, event)
+        if event.type() != QEvent.Type.MouseButtonRelease:
+            return super().eventFilter(obj, event)
+        from PySide6.QtCore import QModelIndex
+
+        view = combo.view()
+        idx: QModelIndex = view.indexAt(event.position().toPoint())
+        if idx.isValid():
+            if idx.row() == 0:
+                # 首项：全部显示
+                for i in range(len(DATA_COLUMNS)):
+                    self._cols_model.item(i + 1).setCheckState(Qt.CheckState.Checked)
+                    self._table.setColumnHidden(COL_DATA_START + i, False)
+                self._save_hidden_columns(set())
+            else:
+                item = self._cols_model.itemFromIndex(idx)
+                data_row = idx.row() - 1  # 首项为功能项
+                on = item.checkState() != Qt.CheckState.Checked
+                item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                self._set_column_visible(DATA_COLUMNS[data_row][1], COL_DATA_START + data_row, on)
+            self._refresh_cols_text()
+        return True  # 阻止下拉收起
+
+    def _set_column_visible(self, key: str, col: int, visible: bool) -> None:
+        self._table.setColumnHidden(col, not visible)
+        hidden = self._hidden_columns()
+        if visible:
+            hidden.discard(key)
+        else:
+            hidden.add(key)
+        self._save_hidden_columns(hidden)
+
     def _selected_doc_ids(self) -> list[int]:
         ids = []
         for r in range(self._table.rowCount()):
-            if self._table.item(r, COL_CHECK).checkState() == Qt.CheckState.Checked:
+            btn = self._table.cellWidget(r, COL_CHECK)
+            if isinstance(btn, QPushButton) and btn.isChecked():
                 ids.append(self._table.item(r, COL_NAME).data(Qt.ItemDataRole.UserRole))
         return ids
 
@@ -261,18 +542,22 @@ class FilterPage(QWidget):
             stmt = select(Document).where(Document.id.in_(ids))
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
-                writer.writerow(["文件名", "合同编号", "开票日期", "金额", "状态", "导入时间"])
+                # 导出跟随当前可见列（所见即所得）
+                visible = [
+                    (title, key, fallback)
+                    for i, (title, key, fallback, _, _) in enumerate(DATA_COLUMNS)
+                    if not self._table.isColumnHidden(COL_DATA_START + i)
+                ]
+                writer.writerow(["文件名", *[t for t, _, _ in visible], "状态", "导入时间"])
                 for doc in session.scalars(stmt):
                     fields = {fd.field_name: fd.normalized_value for fd in doc.fields}
+                    row_values = []
+                    for _, key, fallback in visible:
+                        v = fields.get(key) or (fields.get(fallback) if fallback else None)
+                        row_values.append(str(v) if v not in (None, "") else "")
                     writer.writerow(
-                        [
-                            doc.file_name,
-                            fields.get("contract_no") or "",
-                            fields.get("sign_date") or "",
-                            fields.get("amount") or "",
-                            _status_text(doc.status),
-                            doc.imported_at.strftime("%Y-%m-%d %H:%M:%S"),
-                        ]
+                        [doc.file_name, *row_values, _status_text(doc.status),
+                         doc.imported_at.strftime("%Y-%m-%d %H:%M:%S")]
                     )
         self._toast.show_message(f"已导出 {len(ids)} 条数据")
 
@@ -281,7 +566,8 @@ class FilterPage(QWidget):
         self.detail_requested.emit(doc_id, self._table.item(row, COL_NAME).text())
 
     def _copy_row(self, row: int) -> None:
-        cells = [self._table.item(row, c).text() for c in (COL_NAME, COL_CODE, COL_DATE, COL_AMOUNT)]
+        cols = [COL_NAME, *range(COL_DATA_START, COL_DATA_START + len(DATA_COLUMNS))]
+        cells = [self._table.item(row, c).text() for c in cols]
         from PySide6.QtWidgets import QApplication
 
         QApplication.clipboard().setText("\t".join(cells))
@@ -307,5 +593,6 @@ class FilterPage(QWidget):
                 session.add(AuditLog(action="delete_document", detail=f"id={doc_id} name={name}"))
                 session.commit()
         self._table.removeRow(row)
+        self._action_table.removeRow(row)
         self._update_select_count()
         self._toast.show_message("已删除")

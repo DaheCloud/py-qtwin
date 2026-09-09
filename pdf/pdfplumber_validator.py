@@ -1,4 +1,9 @@
-"""pdfplumber 交叉验证：只针对关键字段二次提取并比较标准化结果。"""
+"""pdfplumber 交叉验证：只针对关键字段二次提取并比较标准化结果。
+
+固定字段（rect）：pdfplumber 在同一矩形区域内重新取词拼接比对；
+动态字段（anchor）：pdfplumber 用自己的切词引擎独立取词，
+跑与 PyMuPDF 完全相同的锚点规则（extract_anchor_field）后比对。
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from typing import Any
 
 import pdfplumber
 
+from pdf.dynamic_parser import _Word, extract_anchor_field
 from pdf.normalizers import normalize_amount, normalize_date, normalize_text
 from pdf.pymupdf_parser import ParseReport
 
@@ -64,16 +70,35 @@ class PdfplumberValidator:
                 if page_no >= len(pdf.pages):
                     continue
                 page = pdf.pages[page_no]
-                x0, top, x1, bottom = spec["rect"]
 
-                # 在区域内按词收集文本（保留空格），作为 pdfplumber 的提取结果
-                words = page.within_bbox((x0, top, x1, bottom)).extract_words()
-                raw = " ".join(w["text"] for w in words).strip()
+                if "rect" in spec:
+                    # 固定字段：在区域内按词收集文本（保留空格），作为 pdfplumber 的提取结果
+                    x0, top, x1, bottom = spec["rect"]
+                    words = page.within_bbox((x0, top, x1, bottom)).extract_words()
+                    raw = " ".join(w["text"] for w in words).strip()
+                    normalizer = self._NORMALIZERS.get(spec.get("type", "string"), normalize_text)
+                    secondary = normalizer(raw) if raw else None
+                    if isinstance(secondary, Decimal):
+                        secondary = format(secondary, "f")
+                else:
+                    # 动态字段：pdfplumber 独立切词后跑同一套锚点规则二次提取。
+                    # 标签与值字距差异大：宽松切词（x_tolerance=8）合成完整标签词，
+                    # 保守切词（默认 3）保证值不跨列粘连——宽松找锚点、保守取值。
+                    loose_words = [
+                        _Word(w["x0"], w["top"], w["x1"], w["bottom"], w["text"])
+                        for w in page.extract_words(x_tolerance=8)
+                    ]
+                    strict_words = [
+                        _Word(w["x0"], w["top"], w["x1"], w["bottom"], w["text"])
+                        for w in page.extract_words()
+                    ]
+                    secondary_result = extract_anchor_field(
+                        name, strict_words, spec,
+                        parser_name="pdfplumber-dynamic",
+                        anchor_words=loose_words,
+                    )
+                    secondary = secondary_result.normalized_value
 
-                normalizer = self._NORMALIZERS.get(spec.get("type", "string"), normalize_text)
-                secondary = normalizer(raw) if raw else None
-                if isinstance(secondary, Decimal):
-                    secondary = format(secondary, "f")
                 matched = (
                     secondary is not None
                     and primary_result.normalized_value is not None

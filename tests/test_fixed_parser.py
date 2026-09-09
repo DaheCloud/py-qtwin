@@ -49,16 +49,16 @@ def parser():
 # ----------------------------------------------------------- 模板引擎
 
 class TestTemplateEngine:
-    def test_loads_all_templates(self):
-        engine = TemplateEngine("templates")
+    def test_loads_all_templates(self, contract_template_dir):
+        engine = TemplateEngine(contract_template_dir)
         assert "contract_v1" in engine.all
 
-    def test_detect_by_keyword(self, sample_pdf):
-        engine = TemplateEngine("templates")
+    def test_detect_by_keyword(self, sample_pdf, contract_template_dir):
+        engine = TemplateEngine(contract_template_dir)
         tpl = engine.detect(sample_pdf)
         assert tpl is not None and tpl["template"] == "contract_v1"
 
-    def test_detect_returns_none_for_unknown(self, tmp_path):
+    def test_detect_returns_none_for_unknown(self, tmp_path, contract_template_dir):
         path = tmp_path / "other.pdf"
         doc = pymupdf.open()
         page = doc.new_page(width=PAGE_W, height=PAGE_H)
@@ -66,11 +66,11 @@ class TestTemplateEngine:
         doc.save(path)
         doc.close()
 
-        engine = TemplateEngine("templates")
+        engine = TemplateEngine(contract_template_dir)
         assert engine.detect(str(path)) is None
 
-    def test_get_unknown_template(self):
-        engine = TemplateEngine("templates")
+    def test_get_unknown_template(self, contract_template_dir):
+        engine = TemplateEngine(contract_template_dir)
         assert engine.get("no_such_template") is None
 
     def test_missing_dir_returns_empty(self, tmp_path):
@@ -81,9 +81,8 @@ class TestTemplateEngine:
 # ------------------------------------------------------- 固定区域解析
 
 class TestFixedRegionParser:
-    def test_parse_all_fields(self, sample_pdf, parser):
-        tpl = TemplateEngine("templates").get("contract_v1")
-        report = parser.parse(sample_pdf, tpl)
+    def test_parse_all_fields(self, sample_pdf, parser, contract_template):
+        report = parser.parse(sample_pdf, contract_template)
         assert report.mode == "fixed"
         assert report.normalized == {
             "contract_no": "HT20260901",

@@ -30,7 +30,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
     if not args.pdf:
         print("可用模板：", ", ".join(engine_templates.all) or "（templates/ 目录为空）")
-        print("用法：python main.py --cli <pdf路径> [--template contract_v1]")
+        print("用法：python main.py --cli <pdf路径> [--template invoice_v1]")
         return 0
 
     if args.template:
