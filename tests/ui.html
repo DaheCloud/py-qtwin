@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>固定结构 PDF 识别管理后台</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body {
+            display: flex;
+            height: 100vh;
+            background-color: #f1f5f9;
+            color: #334155;
+            overflow: hidden;
+        }
+
+        /* 侧边栏 */
+        .sidebar {
+            width: 220px;
+            background-color: #0f172a;
+            color: #94a3b8;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar .brand {
+            padding: 20px 16px;
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
+            border-bottom: 1px solid #1e293b;
+        }
+
+        .sidebar .nav-list {
+            list-style: none;
+            padding: 16px 8px;
+            flex-grow: 1;
+        }
+
+        .sidebar .nav-item {
+            padding: 12px 16px;
+            margin-bottom: 4px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sidebar .nav-item:hover {
+            background-color: #1e293b;
+            color: #f8fafc;
+        }
+
+        .sidebar .nav-item.active {
+            background-color: #2563eb;
+            color: #ffffff;
+            font-weight: 500;
+        }
+
+        /* 主区域 */
+        .main-container {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .topbar {
+            height: 56px;
+            background-color: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+        }
+
+        .content-body {
+            padding: 20px;
+            flex-grow: 1;
+            overflow-y: auto;
+        }
+
+        .page-panel {
+            display: none;
+            flex-direction: column;
+            gap: 16px;
+            height: 100%;
+        }
+
+        .page-panel.active {
+            display: flex;
+        }
+
+        .card {
+            background-color: #ffffff;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            padding: 16px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        /* 拖拽上传交互区 */
+        .drop-zone {
+            border: 2px dashed #cbd5e1;
+            border-radius: 8px;
+            padding: 36px 20px;
+            text-align: center;
+            background-color: #f8fafc;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .drop-zone.drag-over {
+            border-color: #2563eb;
+            background-color: #eff6ff;
+            transform: scale(1.005);
+        }
+
+        /* 进度条 */
+        .progress-bar-bg {
+            width: 100%;
+            height: 6px;
+            background-color: #e2e8f0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background-color: #2563eb;
+            width: 0%;
+            transition: width 0.2s ease;
+        }
+
+        /* 按钮组件 */
+        .btn {
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: none;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary { background-color: #2563eb; color: #ffffff; }
+        .btn-success { background-color: #16a34a; color: #ffffff; }
+        .btn-default { background-color: #ffffff; color: #475569; border: 1px solid #cbd5e1; }
+        .btn-danger-text { background-color: transparent; color: #ef4444; }
+
+        /* 表格样式 */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .data-table th, .data-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            text-align: left;
+        }
+
+        .data-table th { background-color: #f8fafc; color: #64748b; }
+
+        /* Tooltip 悬浮复制 */
+        .copyable-cell {
+            position: relative;
+            cursor: pointer;
+        }
+
+        .copyable-cell::before {
+            content: "点击复制";
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%) translateY(-4px);
+            background-color: #0f172a;
+            color: #ffffff;
+            padding: 4px 8px;
+            font-size: 11px;
+            border-radius: 4px;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .copyable-cell:hover::before {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .badge-success { background-color: #dcfce7; color: #15803d; }
+        .badge-warning { background-color: #fef3c7; color: #b45309; }
+        .badge-info { background-color: #dbeafe; color: #1e40af; }
+
+        /* 弹窗 Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(15, 23, 42, 0.6);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal-container {
+            width: 90vw;
+            height: 85vh;
+            background-color: #ffffff;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .modal-body {
+            flex-grow: 1;
+            padding: 16px;
+            display: grid;
+            grid-template-columns: 1.2fr 1fr;
+            gap: 16px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: #0f172a;
+            color: #ffffff;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            display: none;
+            z-index: 2000;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 侧边栏（包含三个入口） -->
+    <div class="sidebar">
+        <div class="brand">📄 PDF 结构识别系统</div>
+        <ul class="nav-list">
+            <li class="nav-item active" onclick="switchTab(this, 'page-upload', '文件上传与管理')">
+                📂 文件上传与管理
+            </li>
+            <li class="nav-item" onclick="switchTab(this, 'page-filter', '数据筛选与管理')">
+                🔍 数据筛选与管理
+            </li>
+            <li class="nav-item" onclick="switchTab(this, 'page-settings', '系统设置')">
+                ⚙️ 系统设置
+            </li>
+        </ul>
+    </div>
+
+    <!-- 主界面 -->
+    <div class="main-container">
+        <div class="topbar">
+            <h3 style="font-size: 16px;" id="current-page-title">文件上传与管理</h3>
+            <span style="font-size: 13px; color: #64748b;">操作员：Admin</span>
+        </div>
+
+        <div class="content-body">
+            
+            <!-- 入口 1: 文件上传与管理 -->
+            <div class="page-panel active" id="page-upload">
+                <div class="card drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+                    <input type="file" id="file-input" multiple accept=".pdf" style="display: none;" onchange="handleFiles(this.files)">
+                    <p style="color: #64748b; font-size: 14px; margin-bottom: 12px;">拖拽多个 PDF 文件至此处，或点击选择文件上传</p>
+                    <button class="btn btn-primary" onclick="event.stopPropagation(); document.getElementById('file-input').click()">选取本地文件</button>
+                </div>
+
+                <div class="card" style="flex-grow: 1;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <h4 style="font-size: 14px;">上传队列与解析状态</h4>
+                        <button class="btn btn-default" style="font-size: 12px;" onclick="clearQueue()">清空已完成</button>
+                    </div>
+                    
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>文件名</th>
+                                <th>文件大小</th>
+                                <th>导入时间</th>
+                                <th style="width: 180px;">上传进度</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="upload-list">
+                            <!-- 动态加载上传项 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 入口 2: 数据筛选与管理 -->
+            <div class="page-panel" id="page-filter">
+                <div class="card filter-bar" style="display: flex; gap: 12px; align-items: center;">
+                    <input type="text" placeholder="搜索文件名/发票代码..." class="input-control" style="padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; width: 220px;">
+                    <select style="padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                        <option value="">全部识别状态</option>
+                        <option value="success">准确</option>
+                        <option value="warning">可疑/待校验</option>
+                    </select>
+                    <button class="btn btn-primary">查询</button>
+                </div>
+
+                <div class="card" style="flex-grow: 1;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <button class="btn btn-success" onclick="exportSelected()">📊 批量导出选中项至 Excel</button>
+                        <span style="font-size: 12px; color: #64748b;">已选择 <b id="select-count" style="color: #2563eb;">0</b> 项</span>
+                    </div>
+
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px;"><input type="checkbox" onclick="toggleSelectAll(this)"></th>
+                                <th>文件名</th>
+                                <th>发票代码</th>
+                                <th>开票日期</th>
+                                <th>金额</th>
+                                <th>状态</th>
+                                <th style="width: 180px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><input type="checkbox" class="row-checkbox" onclick="updateSelectCount()"></td>
+                                <td class="copyable-cell" onclick="copyCell(this)">invoice_2026_03.pdf</td>
+                                <td class="copyable-cell" onclick="copyCell(this)">1100182350</td>
+                                <td class="copyable-cell" onclick="copyCell(this)">2026-03-09</td>
+                                <td class="copyable-cell" onclick="copyCell(this)">￥12,500.00</td>
+                                <td><span class="badge badge-warning">可疑</span></td>
+                                <td>
+                                    <button class="btn btn-default" style="padding: 2px 8px;" onclick="openModal('invoice_2026_03.pdf')">查看</button>
+                                    <button class="btn btn-default" style="padding: 2px 8px;" onclick="copyRow(this)">复制</button>
+                                    <button class="btn btn-danger-text" style="padding: 2px 8px;" onclick="deleteRow(this)">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 入口 3: 系统设置 -->
+            <div class="page-panel" id="page-settings">
+                <div class="card" style="max-width: 600px; display: flex; flex-direction: column; gap: 16px;">
+                    <h4 style="font-size: 15px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">识别与自动化配置</h4>
+                    <div>
+                        <label style="font-size: 13px; font-weight: 500;">置信度预警阈值 (%)</label>
+                        <input type="number" value="85" style="width: 100%; margin-top: 6px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 6px;">
+                    </div>
+                    <button class="btn btn-primary" style="width: 100px;" onclick="showToast('设置已保存')">保存设置</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- 查看弹窗 Modal -->
+    <div class="modal-overlay" id="detail-modal">
+        <div class="modal-container">
+            <div style="padding: 12px 20px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between;">
+                <h4 style="font-size: 15px;" id="modal-filename">文档详情 - invoice_2026_03.pdf</h4>
+                <button class="btn btn-default" onclick="closeModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div style="background-color: #475569; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white;">
+                    [ PDF 预览区 ]
+                </div>
+                <div>
+                    <h5 style="margin-bottom: 12px;">识别字段校验</h5>
+                    <p style="font-size: 13px; color: #64748b;">发票代码：1100182350</p>
+                    <p style="font-size: 13px; color: #64748b; margin-top: 8px;">合计金额：￥12,500.00</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">提示消息</div>
+
+    <script>
+        // 格式化当前时间字符串 (YYYY-MM-DD HH:mm:ss)
+        function getCurrentDateTime() {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        }
+
+        // 1. 拖拽与上传纯前端交互模拟
+        const dropZone = document.getElementById('drop-zone');
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.add('drag-over');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.remove('drag-over');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles(files);
+        });
+
+        function handleFiles(files) {
+            if (!files.length) return;
+            
+            const list = document.getElementById('upload-list');
+            const importTime = getCurrentDateTime(); // 统一记录本次添加动作的时间
+            
+            Array.from(files).forEach((file, index) => {
+                const rowId = 'file-row-' + Date.now() + '-' + index;
+                const fileSize = (file.size / 1024 / 1024).toFixed(2) + ' MB';
+                
+                const tr = document.createElement('tr');
+                tr.id = rowId;
+                tr.innerHTML = `
+                    <td>${file.name}</td>
+                    <td>${fileSize}</td>
+                    <td style="color: #64748b; font-size: 12px;">${importTime}</td>
+                    <td>
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="progress-${rowId}"></div>
+                        </div>
+                    </td>
+                    <td><span class="badge badge-info" id="status-${rowId}">上传中...</span></td>
+                    <td><button class="btn btn-danger-text" style="padding: 2px 8px;" onclick="removeUploadRow('${rowId}')">取消</button></td>
+                `;
+                list.appendChild(tr);
+
+                // 模拟上传进度动画
+                simulateUpload(rowId);
+            });
+
+            showToast(`已成功添加 ${files.length} 个文件到队列`);
+        }
+
+        function simulateUpload(rowId) {
+            let progress = 0;
+            const progressBar = document.getElementById(`progress-${rowId}`);
+            const statusBadge = document.getElementById(`status-${rowId}`);
+            
+            const interval = setInterval(() => {
+                progress += Math.floor(Math.random() * 25) + 10;
+                if (progress >= 100) {
+                    progress = 100;
+                    clearInterval(interval);
+                    if (progressBar) progressBar.style.width = '100%';
+                    if (statusBadge) {
+                        statusBadge.className = 'badge badge-success';
+                        statusBadge.innerText = '已完成';
+                    }
+                } else {
+                    if (progressBar) progressBar.style.width = progress + '%';
+                }
+            }, 300);
+        }
+
+        function removeUploadRow(rowId) {
+            const row = document.getElementById(rowId);
+            if (row) row.remove();
+        }
+
+        function clearQueue() {
+            const completedRows = document.querySelectorAll('#upload-list tr');
+            completedRows.forEach(row => {
+                if (row.querySelector('.badge-success')) {
+                    row.remove();
+                }
+            });
+            showToast('已清理完成项');
+        }
+
+        // 2. Tab 切换
+        function switchTab(el, pageId, title) {
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            document.querySelectorAll('.page-panel').forEach(panel => panel.classList.remove('active'));
+
+            el.classList.add('active');
+            document.getElementById(pageId).classList.add('active');
+            document.getElementById('current-page-title').innerText = title;
+        }
+
+        // 3. 弹窗与表格常规操作
+        function openModal(filename) {
+            document.getElementById('modal-filename').innerText = '文档详情 - ' + filename;
+            document.getElementById('detail-modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('detail-modal').classList.remove('active');
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 2000);
+        }
+
+        function copyCell(td) {
+            navigator.clipboard.writeText(td.innerText.trim());
+            showToast('已复制：' + td.innerText.trim());
+        }
+
+        function copyRow(btn) {
+            showToast('整行数据已复制');
+        }
+
+        function deleteRow(btn) {
+            if (confirm('确认删除？')) btn.closest('tr').remove();
+        }
+
+        function toggleSelectAll(source) {
+            document.querySelectorAll('.row-checkbox').forEach(cb => cb.checked = source.checked);
+            updateSelectCount();
+        }
+
+        function updateSelectCount() {
+            document.getElementById('select-count').innerText = document.querySelectorAll('.row-checkbox:checked').length;
+        }
+
+        function exportSelected() {
+            showToast('导出任务已触发');
+        }
+    </script>
+</body>
+</html>
