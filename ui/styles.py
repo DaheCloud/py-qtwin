@@ -503,6 +503,7 @@ QScrollBar::handle:vertical {{
 QScrollBar::handle:vertical:hover {{
     background: {t['SCROLL_HANDLE_HOVER']};
 }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar:horizontal {{
     background: {t['BG_SUBTLE']};
@@ -518,6 +519,7 @@ QScrollBar::handle:horizontal {{
 QScrollBar::handle:horizontal:hover {{
     background: {t['SCROLL_HANDLE_HOVER']};
 }}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
 /* ================ 弹窗 / 提示 ================ */

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QApplication
 
-from paths import default_db_path
+from paths import default_db_path, ensure_data_dir
 from ui.main_window import MainWindow
 from ui.pages.settings_page import get_theme_choice, load_settings
 from ui.styles import apply_theme, make_app_icon, ui_font
@@ -20,6 +20,7 @@ def create_app() -> QApplication:
 
 
 def run_app(db_path: str | None = None) -> int:
+    ensure_data_dir()  # 幂等：建目录 + 旧数据一次性迁移
     app = create_app()
     window = MainWindow(db_path=db_path or default_db_path())
     window.show()

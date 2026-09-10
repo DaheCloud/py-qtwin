@@ -11,12 +11,17 @@ import sys
 from pathlib import Path
 
 # Windows 控制台默认 GBK，强制 UTF-8 输出避免中文乱码
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+# 仅当 stdout 可用时设置；windowed exe 模式下 sys.stdout 为 None，应跳过
+if sys.stdout is not None and sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        if sys.stderr is not None:
+            sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
 
 from database.db import get_engine, init_db, make_session_factory
-from paths import default_db_path, templates_dir
+from paths import default_db_path, ensure_data_dir, templates_dir
 from pdf.template_engine import TemplateEngine
 from services.pdf_service import PdfService
 
@@ -58,6 +63,8 @@ def run_cli(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 尽早建立数据目录并迁移旧版 exe 同目录数据（数据根已移至 %APPDATA%）
+    ensure_data_dir()
     parser = argparse.ArgumentParser(description="固定结构 PDF 识别工具")
     parser.add_argument("pdf", nargs="?", help="要处理的 PDF 文件路径")
     parser.add_argument("--cli", action="store_true", help="使用命令行模式而不启动 GUI")

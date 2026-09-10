@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import csv
 from datetime import datetime
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal, QSize
@@ -392,9 +391,9 @@ class FilterPage(QWidget):
 
     def _auto_fit_enabled(self) -> bool:
         """自适应列宽开关状态（持久化，默认关闭）。"""
-        from PySide6.QtCore import QSettings
+        from ui.pages.settings_page import load_settings
 
-        return QSettings("pdf-project", "pdf-structure-recognition").value(
+        return load_settings().value(
             _KEY_AUTO_FIT, False, type=bool
         )
 
@@ -403,9 +402,9 @@ class FilterPage(QWidget):
 
     def _toggle_auto_fit(self, checked: bool) -> None:
         """切换自适应开关：开启时立即执行一次自适应，状态持久化。"""
-        from PySide6.QtCore import QSettings
+        from ui.pages.settings_page import load_settings
 
-        QSettings("pdf-project", "pdf-structure-recognition").setValue(_KEY_AUTO_FIT, checked)
+        load_settings().setValue(_KEY_AUTO_FIT, checked)
         self._sync_auto_fit_btn()
         if checked:
             self._auto_fit_columns()
@@ -424,15 +423,15 @@ class FilterPage(QWidget):
 
     def _hidden_columns(self) -> set[str]:
         """读取持久化的隐藏列（字段名集合）。"""
-        from PySide6.QtCore import QSettings
+        from ui.pages.settings_page import load_settings
 
-        raw = str(QSettings("pdf-project", "pdf-structure-recognition").value(_KEY_HIDDEN_COLS, ""))
+        raw = str(load_settings().value(_KEY_HIDDEN_COLS, ""))
         return {s for s in raw.split(",") if s}
 
     def _save_hidden_columns(self, hidden: set[str]) -> None:
-        from PySide6.QtCore import QSettings
+        from ui.pages.settings_page import load_settings
 
-        QSettings("pdf-project", "pdf-structure-recognition").setValue(
+        load_settings().setValue(
             _KEY_HIDDEN_COLS, ",".join(sorted(hidden))
         )
 
@@ -527,39 +526,107 @@ class FilterPage(QWidget):
         if not ids:
             self._toast.show_message("请先勾选要导出的行")
             return
-        default_name = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        path, _ = QFileDialog.getSaveFileName(self, "导出 CSV", default_name, "CSV 文件 (*.csv)")
+        default_name = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "导出 Excel", default_name, "Excel 工作簿 (*.xlsx)")
         if not path:
             return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
         from sqlalchemy import select
 
         from database.db import get_engine, make_session_factory
-        from models.document import Document, ExtractedField
+        from models.document import Document
+
+        # 税号列强制文本（防止 Excel 把 18 位信用代码转成科学计数法丢精度）；
+        # 金额列尽量写成数字单元格便于后续计算。
+        TAX_NO_KEYS = {"buyer_tax_no", "seller_tax_no"}
+        AMOUNT_KEYS = {"amount", "tax_amount", "total_amount"}
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Font
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            QMessageBox.warning(self, "缺少依赖", "未安装 openpyxl，无法导出 Excel。请执行：pip install openpyxl")
+            return
 
         engine = get_engine(self._db_path)
         factory = make_session_factory(engine)
+
+        # 仅「准确」(success) 数据可导出；勾选中含「可疑/待校验」时需确认
         with factory() as session:
-            stmt = select(Document).where(Document.id.in_(ids))
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f)
-                # 导出跟随当前可见列（所见即所得）
-                visible = [
-                    (title, key, fallback)
-                    for i, (title, key, fallback, _, _) in enumerate(DATA_COLUMNS)
-                    if not self._table.isColumnHidden(COL_DATA_START + i)
-                ]
-                writer.writerow(["文件名", *[t for t, _, _ in visible], "状态", "导入时间"])
-                for doc in session.scalars(stmt):
-                    fields = {fd.field_name: fd.normalized_value for fd in doc.fields}
-                    row_values = []
-                    for _, key, fallback in visible:
-                        v = fields.get(key) or (fields.get(fallback) if fallback else None)
-                        row_values.append(str(v) if v not in (None, "") else "")
-                    writer.writerow(
-                        [doc.file_name, *row_values, _status_text(doc.status),
-                         doc.imported_at.strftime("%Y-%m-%d %H:%M:%S")]
-                    )
-        self._toast.show_message(f"已导出 {len(ids)} 条数据")
+            status_rows = session.execute(
+                select(Document.id, Document.status).where(Document.id.in_(ids))
+            ).all()
+        status_map = dict(status_rows)
+        ok_ids = {i for i, s in status_map.items() if s == "success"}
+        suspect_n = len(ids) - len(ok_ids)
+        if not ok_ids:
+            self._toast.show_message("勾选的数据中没有「准确」状态的记录，无法导出")
+            return
+        if suspect_n:
+            answer = QMessageBox.question(
+                self,
+                "包含可疑数据",
+                f"勾选中包含 {suspect_n} 条「可疑/待校验」数据，\n"
+                f"将仅导出 {len(ok_ids)} 条「准确」数据。是否继续？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        with factory() as session:
+            stmt = select(Document).where(Document.id.in_(ok_ids))
+            # 导出跟随当前可见列（所见即所得）
+            visible = [
+                (title, key, fallback)
+                for i, (title, key, fallback, _, _) in enumerate(DATA_COLUMNS)
+                if not self._table.isColumnHidden(COL_DATA_START + i)
+            ]
+            headers = ["文件名", *[t for t, _, _ in visible]]
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "解析结果"
+            ws.append(headers)
+            for col in range(1, len(headers) + 1):
+                c = ws.cell(row=1, column=col)
+                c.font = Font(bold=True)
+                c.alignment = Alignment(horizontal="center")
+            ws.freeze_panes = "A2"
+            for i, h in enumerate(headers, start=1):
+                width = 32 if i == 1 else max(12, min(40, len(h) * 2 + 6))
+                ws.column_dimensions[get_column_letter(i)].width = width
+
+            for doc in session.scalars(stmt):
+                fields = {fd.field_name: fd.normalized_value for fd in doc.fields}
+                row_values: list[object] = []
+                for _, key, fallback in visible:
+                    v = fields.get(key) or (fields.get(fallback) if fallback else None)
+                    text = str(v) if v not in (None, "") else ""
+                    row_values.append(text if text else None)
+                ws.append([doc.file_name, *row_values])
+
+            # 数据行写完后，按列统一设置格式
+            last_row = ws.max_row
+            for idx, (_, key, _) in enumerate(visible):
+                col = 2 + idx  # Excel 列号：A=文件名，B 起为数据列
+                letter = get_column_letter(col)
+                if key in TAX_NO_KEYS:
+                    for r in range(2, last_row + 1):
+                        ws[f"{letter}{r}"].number_format = "@"
+                elif key in AMOUNT_KEYS:
+                    for r in range(2, last_row + 1):
+                        cell = ws[f"{letter}{r}"]
+                        if isinstance(cell.value, str) and cell.value:
+                            try:
+                                cell.value = float(cell.value.replace(",", ""))
+                                cell.number_format = "#,##0.00"
+                            except ValueError:
+                                pass
+            try:
+                wb.save(path)
+            except OSError as e:
+                QMessageBox.warning(self, "导出失败", f"无法写入文件（可能正被 Excel 打开）：\n{e}")
+                return
+        self._toast.show_message(f"已导出 {len(ok_ids)} 条「准确」数据")
 
     def _view_row(self, row: int) -> None:
         doc_id = self._table.item(row, COL_NAME).data(Qt.ItemDataRole.UserRole)

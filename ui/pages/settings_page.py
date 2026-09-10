@@ -1,6 +1,7 @@
-"""页面 3：系统设置（对应 ui.html 的 #page-settings）。
+r"""页面 3：系统设置（对应 ui.html 的 #page-settings）。
 
-置信度预警阈值、动态兜底、界面主题等配置，QSettings 持久化（注册表/INI，无需外部文件）。
+置信度预警阈值、动态兜底、界面主题等配置，QSettings 持久化为 INI 文件
+（%APPDATA%\PdfDataTool\settings.ini，不写 Windows 注册表）。
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ from PySide6.QtWidgets import (
 from ui.styles import apply_theme, ui_font
 from ui.widgets.common import Toast
 
-ORG = "pdf-project"
-APP = "pdf-structure-recognition"
+ORG = "PdfDataTool"
+APP = "settings"
 KEY_THRESHOLD = "recognition/confidence_threshold"
 KEY_FALLBACK = "recognition/dynamic_fallback"
 KEY_THEME = "appearance/theme"
@@ -38,7 +39,8 @@ _THEME_LABEL = dict(THEME_OPTIONS)
 
 
 def load_settings() -> QSettings:
-    return QSettings(ORG, APP)
+    """INI 文件后端：%APPDATA%\\PdfDataTool\\settings.ini（与数据库同目录，不写注册表）。"""
+    return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, ORG, APP)
 
 
 def get_confidence_threshold(settings: QSettings | None = None) -> int:
