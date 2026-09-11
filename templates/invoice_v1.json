@@ -105,8 +105,9 @@
       "page": 0,
       "anchor": "金",
       "direction": "below",
-      "max_distance": 110,
+      "max_distance": 800,
       "below_mode": "each",
+      "pick": "last",
       "type": "decimal",
       "pattern": "^[¥￥][\\d,]+\\.\\d{2}$",
       "verify": true
@@ -115,8 +116,9 @@
       "page": 0,
       "anchor": "税",
       "direction": "below",
-      "max_distance": 110,
+      "max_distance": 800,
       "below_mode": "each",
+      "pick": "last",
       "type": "decimal",
       "pattern": "^[¥￥][\\d,]+\\.\\d{2}$",
       "verify": true

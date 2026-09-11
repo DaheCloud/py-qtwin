@@ -30,6 +30,12 @@ _SEPARATORS = "：: \u3000"
 # 左移 1~5pt（字距挤压），严格 >= 会漏掉所有候选，故允许少量重叠。
 _X_TOLERANCE = 6.0
 
+# 候选与锚点的行/列重叠质量阈值：≥ 该比例视为"严格同行/同列"。
+# 擦边重叠（如金额列的值与"税率/征收率"表头仅擦边几 pt）会被降到宽松层，
+# 避免多个锚点共存时借用相邻列的候选抢先命中（"税"→取到金额列的值）；
+# 宽松层仍作为兜底保留，只有严格层完全无匹配时才使用。
+_STRICT_OVERLAP_RATIO = 0.5
+
 _NORMALIZERS: dict[str, Any] = {
     "string": normalize_text,
     "decimal": normalize_amount,
@@ -66,6 +72,23 @@ def _x_overlap(a: _Word, b: _Word) -> bool:
     return b.x0 < a.x1 and b.x1 > a.x0
 
 
+def _overlap_ratio(a: _Word, b: _Word, axis: str) -> float:
+    """候选与锚点在指定轴上的重叠质量 = 重叠长度 / 较短一方长度。
+
+    axis="x" 用于 below（同列判断），axis="y" 用于 right（同行判断）。
+    完全同词/包含关系为 1.0；擦边重叠接近 0。
+    """
+    if axis == "x":
+        lo, hi = max(a.x0, b.x0), min(a.x1, b.x1)
+        span = min(a.x1 - a.x0, b.x1 - b.x0)
+    else:
+        lo, hi = max(a.y0, b.y0), min(a.y1, b.y1)
+        span = min(a.y1 - a.y0, b.y1 - b.y0)
+    if span <= 0:
+        return 0.0
+    return max(0.0, min(1.0, (hi - lo) / span))
+
+
 def extract_anchor_field(
     name: str,
     words: list[_Word],
@@ -81,6 +104,10 @@ def extract_anchor_field(
     anchor_words：可选的"找锚点专用"词表。pdfplumber 交叉验证场景下标签与
     值的字距差异大：宽松切词才能合成完整标签词、保守切词才能保证值不跨列
     粘连，故用宽松词表定位锚点、保守词表提取值。
+
+    候选分层遍历：与锚点严格同行/同列的候选优先，擦边候选兜底——避免
+    "税"这类多命中锚点借用相邻列的候选抢先命中（取错值）。
+    pick="last" 时在同一层内取最后一个匹配（如"金额"列最下方的合计值）。
     """
     anchor = spec.get("anchor")
     if not anchor:
@@ -90,42 +117,60 @@ def extract_anchor_field(
 
     direction = spec.get("direction", "right")
     pattern = spec.get("pattern")
-    candidates = _find_candidates(words, anchor, direction, spec, anchor_words)
+    pick = spec.get("pick", "first")
+    groups = _anchor_candidate_groups(words, anchor, direction, spec, anchor_words)
 
-    for value_word in candidates:
-        value = _strip_leading_separators(value_word.text)
-        if pattern and not re.fullmatch(pattern, value):
-            continue  # 该候选不合法，继续找下一个
-        normalizer = _NORMALIZERS.get(spec.get("type", "string"), normalize_text)
-        normalized = normalizer(value) if value else None
-        if isinstance(normalized, Decimal):
-            normalized = format(normalized, "f")
-        result = FieldResult(
-            field_name=name,
-            raw_value=value,
-            normalized_value=normalized,
-            parser=parser_name,
-        )
-        return validate_field(result, spec)
+    for strict in (True, False):
+        matches: list[_Word] = []
+        for _anchor_word, candidates in groups:
+            for quality, value_word in candidates:
+                if (quality >= _STRICT_OVERLAP_RATIO) != strict:
+                    continue  # 本轮只处理对应层级的候选
+                value = _strip_leading_separators(value_word.text)
+                if pattern and not re.fullmatch(pattern, value):
+                    continue  # 该候选不合法，继续找下一个
+                matches.append(value_word)
+        if matches:
+            chosen = matches[-1] if pick == "last" else matches[0]
+            return _build_field_result(name, chosen, spec, parser_name)
 
     result = FieldResult(name, "", parser=parser_name)
-    if not candidates:
-        result.fail(f"未找到锚点 {anchor!r} 或锚点附近没有候选值")
-    else:
+    if any(candidates for _, candidates in groups):
         result.fail(f"锚点 {anchor!r} 附近的候选值均不匹配 pattern {pattern}")
+    else:
+        result.fail(f"未找到锚点 {anchor!r} 或锚点附近没有候选值")
     return result
 
 
-def _find_candidates(
+def _build_field_result(
+    name: str, value_word: _Word, spec: dict[str, Any], parser_name: str
+) -> FieldResult:
+    """把候选词归一化 + 校验后包装成 FieldResult。"""
+    value = _strip_leading_separators(value_word.text)
+    normalizer = _NORMALIZERS.get(spec.get("type", "string"), normalize_text)
+    normalized = normalizer(value) if value else None
+    if isinstance(normalized, Decimal):
+        normalized = format(normalized, "f")
+    result = FieldResult(
+        field_name=name,
+        raw_value=value,
+        normalized_value=normalized,
+        parser=parser_name,
+    )
+    return validate_field(result, spec)
+
+
+def _anchor_candidate_groups(
     words: list[_Word],
     anchor: str,
     direction: str,
     spec: dict[str, Any],
     anchor_words: list[_Word] | None = None,
-) -> list[_Word]:
-    """返回按优先级排序的候选值词列表（可能为空）。
+) -> list[tuple[_Word, list[tuple[float, _Word]]]]:
+    """返回 [(锚点词, [(重叠质量, 候选词), ...]), ...]；无锚点时为 []。
 
     锚点优先从 anchor_words（宽松切词）查找，缺失时回退到 words。
+    重叠质量用于分层遍历：1.0 = 同词；接近 1 = 严格同行/同列；接近 0 = 擦边。
     """
     src = anchor_words if anchor_words is not None else words
     anchors = [w for w in src if anchor in w.text]
@@ -134,13 +179,16 @@ def _find_candidates(
     if not anchors:
         return []
 
-    candidates: list[_Word] = []
+    groups: list[tuple[_Word, list[tuple[float, _Word]]]] = []
     for anchor_word in anchors:
-        # 情形 1：值与锚点同词（如 "合同编号：HT20260901"）
+        candidates: list[tuple[float, _Word]] = []
+        # 情形 1：值与锚点同词（如 "合同编号：HT20260901"），同词视为最高质量
         tail = anchor_word.text.split(anchor, 1)[1]
         tail = _strip_leading_separators(tail)
         if tail:
-            candidates.append(_Word(anchor_word.x0, anchor_word.y0, anchor_word.x1, anchor_word.y1, tail))
+            candidates.append(
+                (1.0, _Word(anchor_word.x0, anchor_word.y0, anchor_word.x1, anchor_word.y1, tail))
+            )
 
         # 情形 2：同行右侧最近的独立词（pattern 逐词/拼接尝试）
         if direction == "right":
@@ -151,7 +199,8 @@ def _find_candidates(
                 and (not spec.get("same_line", True) or _line_overlap(anchor_word, w))
             ]
             same_line_right.sort(key=lambda w: w.x0)
-            candidates.extend(_joined_candidates(same_line_right, limit=3))
+            for w in _joined_candidates(same_line_right, limit=3):
+                candidates.append((_overlap_ratio(anchor_word, w, "y"), w))
 
         # 情形 3：下方最近词（x 有重叠，y 距离受限）
         elif direction == "below":
@@ -165,23 +214,29 @@ def _find_candidates(
             ]
             below.sort(key=lambda w: w.y0)
             below_mode = spec.get("below_mode", "prefix")
+            produced: list[_Word] = []
             if below_mode == "merge":
                 # 跨行单元格（如发票表格值被拆成两行）：全部按序合并为完整值
                 if below:
                     merged = "".join(w.text for w in below)
-                    candidates.append(
+                    produced.append(
                         _Word(below[0].x0, below[0].y0, below[-1].x1, below[-1].y1, merged)
                     )
             elif below_mode == "each":
                 # 逐词候选（配合 pattern 区分同列多行，如明细金额 vs 合计金额）
-                candidates.extend(below)
+                produced.extend(below)
             else:
-                candidates.extend(_joined_candidates(below, limit=3))
+                produced.extend(_joined_candidates(below, limit=3))
+            for w in produced:
+                candidates.append((_overlap_ratio(anchor_word, w, "x"), w))
 
-    return _filter_x_range(candidates, spec)
+        groups.append((anchor_word, _filter_x_range(candidates, spec)))
+    return groups
 
 
-def _filter_x_range(candidates: list[_Word], spec: dict[str, Any]) -> list[_Word]:
+def _filter_x_range(
+    candidates: list[tuple[float, _Word]], spec: dict[str, Any]
+) -> list[tuple[float, _Word]]:
     """按模板的 x_min / x_max 过滤候选（以候选起始 x0 为准）。"""
     x_min = spec.get("x_min")
     x_max = spec.get("x_max")
@@ -195,7 +250,7 @@ def _filter_x_range(candidates: list[_Word], spec: dict[str, Any]) -> list[_Word
             return False
         return True
 
-    return [c for c in candidates if in_range(c)]
+    return [(q, c) for q, c in candidates if in_range(c)]
 
 
 def _joined_candidates(sorted_words: list[_Word], limit: int = 3) -> list[_Word]:
@@ -224,8 +279,13 @@ class DynamicRegionParser:
                     merge = 范围内所有词按序合并为一个候选（跨行单元格完整值）；
                     each  = 范围内每个词各自成候选（配合 pattern 精确挑选）
       pattern       值的正则（fullmatch）；不匹配的候选会被跳过
+      pick          first（默认）= 取首个匹配；last = 取最后一个匹配
+                    （如合计行在明细下方时，取同列最下方的值）
       x_min / x_max 候选值词起始 x 的范围（pt），用于区分左右分栏
                     （如发票购方/销方栏的"名称："锚点文字完全相同）
+
+    候选按"与锚点的行/列重叠质量"分层：先严格同行/同列，再擦边候选兜底，
+    避免"税"这类多命中锚点（纳税人识别号、税率、税额…）借用相邻列的候选。
     """
 
     def parse(self, pdf_path: str, template: dict[str, Any]) -> ParseReport:
