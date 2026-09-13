@@ -23,32 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.field_labels import field_label
 from ui.styles import GREEN, RED, token, ui_font
 from ui.widgets.common import Badge
-
-# 字段名 → 中文显示名（未映射的字段原样显示）
-FIELD_LABELS = {
-    "invoice_no": "发票号码",
-    "invoice_date": "开票日期",
-    "buyer_name": "购买方名称",
-    "buyer_tax_no": "购买方税号",
-    "seller_name": "销售方名称",
-    "seller_tax_no": "销售方税号",
-    "item_name": "项目名称",
-    "construction_site": "建筑服务发生地",
-    "project_name": "建筑项目名称",
-    "tax_rate": "税率",
-    "total_amount": "价税合计",
-    "tax_amount": "税额",
-    "amount": "金额",
-    "contract_no": "合同编号",
-    "customer_name": "客户名称",
-    "sign_date": "签订日期",
-}
-
-
-def _field_label(name: str) -> str:
-    return FIELD_LABELS.get(name, name)
 
 
 def _clear_layout(layout) -> None:
@@ -69,6 +46,7 @@ def _badge_for_status(status: str) -> tuple[str, str]:
         "manual_review": ("warning", "可疑/待校验"),
         "warning": ("warning", "可疑/待校验"),
         "failed": ("failed", "解析失败"),
+        "needs_ocr": ("info", "等待 OCR"),
         "processing": ("info", "解析中"),
         "pending": ("info", "等待解析"),
     }.get(status, ("info", status))
@@ -281,10 +259,27 @@ class DetailDialog(QDialog):
                 return
             status = doc.status
             error_reason = doc.error_reason
+            identify_confidence = doc.identify_confidence
+            parse_confidence = doc.parse_confidence
             fields = [(f.field_name, f.raw_value, f.normalized_value, f.parser) for f in doc.fields]
             verifications = [
                 (v.field_name, v.primary_value, v.secondary_value, v.matched, v.review_status)
                 for v in doc.verifications
+            ]
+            # 明细行（Table Engine 重建结果，方案 §15）：按行展示，便于对照 PDF 核对
+            items = [
+                (
+                    it.row_index,
+                    it.name,
+                    it.spec,
+                    it.unit,
+                    it.quantity,
+                    it.unit_price,
+                    it.amount,
+                    it.tax_rate,
+                    it.tax,
+                )
+                for it in doc.items
             ]
             pdf_path = doc.file_path
 
@@ -300,6 +295,25 @@ class DetailDialog(QDialog):
         badge.setFont(ui_font(9, 500))
         self._status_badge_host.addWidget(badge)
 
+        # 置信度（方案 §10/§31）：识别/解析/综合分开显示，便于判断"是选错模板还是取错值"
+        if identify_confidence is not None or parse_confidence is not None:
+            overall_confidence = doc.overall_confidence
+            confidence = QLabel(
+                "识别置信度 "
+                f"{identify_confidence if identify_confidence is not None else '—'}"
+                " · 解析置信度 "
+                f"{parse_confidence if parse_confidence is not None else '—'}"
+                + (
+                    f" · 综合置信度 {overall_confidence}"
+                    if overall_confidence is not None
+                    else ""
+                )
+            )
+            confidence.setStyleSheet(
+                f"color: {token('TEXT_MUTED')}; font-size: 12px;"
+            )
+            self._status_badge_host.addWidget(confidence)
+
         if error_reason:
             reason = QLabel(error_reason)
             reason.setWordWrap(True)
@@ -313,8 +327,19 @@ class DetailDialog(QDialog):
         if not fields:
             self._add_hint("没有解析字段")
         else:
+            # 需要人工确认的字段：交叉验证不一致（未确认）或被点名在错误原因里
+            review_fields = {
+                v_name
+                for v_name, _, _, v_matched, v_review in verifications
+                if not v_matched and v_review != "confirmed"
+            }
+            if error_reason:
+                review_fields.update(seg.split("：", 1)[0].strip() for seg in error_reason.split("；") if seg)
             for name, raw, normalized, parser in fields:
-                self._add_field_row(name, raw, normalized, parser)
+                self._add_field_row(name, raw, normalized, parser, needs_review=name in review_fields)
+
+        if items:
+            self._add_items_section(items)
 
         if verifications:
             sep = QFrame()
@@ -342,16 +367,21 @@ class DetailDialog(QDialog):
         label.setStyleSheet(f"color: {token('TEXT_FAINT')}; font-size: 13px;")
         self._fields_l.addWidget(label)
 
-    def _add_field_row(self, name: str, raw: str | None, normalized: str | None, parser: str) -> None:
+    def _add_field_row(
+        self, name: str, raw: str | None, normalized: str | None, parser: str, needs_review: bool = False
+    ) -> None:
         row = QFrame()
         row.setObjectName("Card")
         row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        if needs_review:
+            # 待人工确认：红色警示边框
+            row.setStyleSheet(f"QFrame#Card {{ border: 1px solid {token('RED')}; }}")
         row_l = QVBoxLayout(row)
         row_l.setContentsMargins(12, 8, 12, 8)
         row_l.setSpacing(2)
 
         head = QHBoxLayout()
-        name_label = QLabel(_field_label(name))
+        name_label = QLabel(field_label(name))
         name_label.setFont(ui_font(10, 600))
         name_label.setStyleSheet(f"color: {token('TITLE_TEXT')};")
         head.addWidget(name_label)
@@ -363,9 +393,6 @@ class DetailDialog(QDialog):
         current = str(normalized if normalized not in (None, "") else raw or "")
         edit_btn.clicked.connect(lambda _=False, n=name, c=current: self._edit_field(n, c))
         head.addWidget(edit_btn)
-        parser_label = QLabel(parser)
-        parser_label.setObjectName("MutedText")
-        head.addWidget(parser_label)
         row_l.addLayout(head)
 
         value_label = QLabel(str(normalized if normalized not in (None, "") else raw or "—"))
@@ -383,6 +410,34 @@ class DetailDialog(QDialog):
 
         self._fields_l.addWidget(row)
 
+    def _add_items_section(self, items: list[tuple]) -> None:
+        """明细行展示（表格引擎重建结果）：行关联关系已建立，逐行对照 PDF 核对。"""
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setObjectName("Divider")
+        sep.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._fields_l.addWidget(sep)
+
+        title = QLabel(f"商品明细（{len(items)} 行 · 表格引擎重建）")
+        title.setFont(ui_font(10, 600))
+        title.setStyleSheet(f"color: {token('TITLE_TEXT')};")
+        self._fields_l.addWidget(title)
+
+        columns = ("序号", "名称", "规格", "单位", "数量", "单价", "金额", "税率", "税额")
+        head = QLabel("　".join(columns))
+        head.setObjectName("MutedText")
+        head.setWordWrap(True)
+        self._fields_l.addWidget(head)
+
+        for row in items:
+            text = "　".join("—" if value in (None, "") else str(value) for value in row)
+            label = QLabel(text)
+            label.setFont(ui_font(10))
+            label.setStyleSheet(f"color: {token('TEXT_PRIMARY')};")
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setWordWrap(True)
+            self._fields_l.addWidget(label)
+
     def _add_verification_row(
         self, name: str, primary: str | None, secondary: str | None, matched: bool, review_status: str = "pending"
     ) -> None:
@@ -393,7 +448,7 @@ class DetailDialog(QDialog):
         mark.setStyleSheet(f"color: {GREEN if (matched or confirmed) else RED}; font-weight: 600;")
         row.addWidget(mark)
         suffix = "" if matched else ("（已人工确认）" if confirmed else "")
-        text = QLabel(f"{_field_label(name)}：{primary or '—'}  ↔  {secondary or '—'}{suffix}")
+        text = QLabel(f"{field_label(name)}：{primary or '—'}  ↔  {secondary or '—'}{suffix}")
         text.setFont(ui_font(10))
         text.setStyleSheet(f"color: {token('TEXT_PRIMARY')};")
         text.setWordWrap(True)  # 长值自动换行，避免撑出水平滚动条
@@ -413,7 +468,7 @@ class DetailDialog(QDialog):
     def _edit_field(self, field_name: str, current: str) -> None:
         """人工修改字段取值：更新字段值，并把该字段的验证记录标记为已确认。"""
         new_value, ok = QInputDialog.getText(
-            self, "修改字段值", f"{_field_label(field_name)}（对照左侧 PDF 原文填写正确值）：", text=current
+            self, "修改字段值", f"{field_label(field_name)}（对照左侧 PDF 原文填写正确值）：", text=current
         )
         if not ok:
             return

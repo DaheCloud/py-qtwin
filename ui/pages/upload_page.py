@@ -372,9 +372,9 @@ class UploadPage(QWidget):
         }.get(status, status)
         self._table.item(row, COL_NAME).setData(_ROW_STATE, "done" if kind == "success" else "failed")
         self._set_status(row, kind, text)
-        tip = f"{text}：{reason}" if reason else text
-        self._table.item(row, COL_STATUS).setToolTip(tip)
         name = Path(self._table.item(row, COL_NAME).data(_ROW_PATH)).name
+        tip = f"{name} · {text}：{reason}" if reason else f"{name} · {text}"
+        self._table.item(row, COL_STATUS).setToolTip(tip)
         if kind == "success":
             self._pending_success.append(name)
         else:

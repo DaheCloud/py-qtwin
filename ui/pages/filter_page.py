@@ -1,6 +1,6 @@
 """页面 2：数据筛选与管理（对应 ui.html 的 #page-filter）。
 
-从 SQLite 读取已解析文档，支持关键字/状态过滤、全选与批量导出、
+从 SQLite 读取已解析文档，支持关键字/状态过滤、全选、批量导出与批量删除、
 点击复制单元格、查看详情、整行复制、删除（含审计日志）。
 """
 
@@ -34,24 +34,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.field_labels import field_label
 from ui.styles import STATUS_BADGE_CLASS, ui_font
 from ui.widgets.common import BadgeDelegate, CopyCellDelegate, Toast
 
 # 数据列定义：(表头, 主字段, 回退字段(旧合同数据兼容), 默认宽度, 是否金额列)
+# 表头中文名统一取自 ui.field_labels（与详情弹窗共用一份映射，避免漂移）
 DATA_COLUMNS: list[tuple[str, str, str | None, int, bool]] = [
-    ("发票号码", "invoice_no", "contract_no", 150, False),
-    ("开票日期", "invoice_date", "sign_date", 100, False),
-    ("购买方名称", "buyer_name", "customer_name", 150, False),
-    ("购买方税号", "buyer_tax_no", None, 160, False),
-    ("销售方名称", "seller_name", None, 150, False),
-    ("销售方税号", "seller_tax_no", None, 160, False),
-    ("项目名称", "item_name", None, 180, False),
-    ("建筑服务发生地", "construction_site", None, 180, False),
-    ("建筑项目名称", "project_name", None, 180, False),
-    ("税率", "tax_rate", None, 55, False),
-    ("金额", "amount", None, 100, True),
-    ("税额", "tax_amount", None, 90, True),
-    ("价税合计", "total_amount", None, 100, True),
+    (field_label("invoice_no"), "invoice_no", "contract_no", 150, False),
+    (field_label("invoice_date"), "invoice_date", "sign_date", 100, False),
+    (field_label("buyer_name"), "buyer_name", "customer_name", 150, False),
+    (field_label("buyer_tax_no"), "buyer_tax_no", None, 160, False),
+    (field_label("seller_name"), "seller_name", None, 150, False),
+    (field_label("seller_tax_no"), "seller_tax_no", None, 160, False),
+    (field_label("item_name"), "item_name", None, 180, False),
+    (field_label("spec_model"), "spec_model", None, 100, False),
+    (field_label("unit"), "unit", None, 55, False),
+    (field_label("quantity"), "quantity", None, 70, False),
+    (field_label("unit_price"), "unit_price", None, 100, True),
+    (field_label("construction_site"), "construction_site", None, 180, False),
+    (field_label("project_name"), "project_name", None, 180, False),
+    (field_label("tax_rate"), "tax_rate", None, 55, False),
+    (field_label("amount"), "amount", None, 100, True),
+    (field_label("tax_amount"), "tax_amount", None, 90, True),
+    (field_label("total_amount"), "total_amount", None, 100, True),
+    (field_label("item_rows"), "item_rows", None, 80, False),
 ]
 COL_CHECK, COL_NAME = 0, 1
 COL_DATA_START = 2
@@ -68,8 +75,15 @@ _STATUS_TEXT = {
     "manual_review": "可疑/待校验",
     "warning": "可疑/待校验",
     "failed": "解析失败",
+    "needs_ocr": "等待 OCR",
 }
-_STATUS_TO_KIND = {"success": "success", "manual_review": "warning", "warning": "warning", "failed": "failed"}
+_STATUS_TO_KIND = {
+    "success": "success",
+    "manual_review": "warning",
+    "warning": "warning",
+    "failed": "failed",
+    "needs_ocr": "info",
+}
 
 
 def _status_text(status: str) -> str:
@@ -155,6 +169,12 @@ class FilterPage(QWidget):
         export_btn.setProperty("cssClass", "btn-success")
         export_btn.clicked.connect(self._export_selected)
         head.addWidget(export_btn)
+
+        delete_btn = QPushButton("🗑 批量删除选中项")
+        delete_btn.setProperty("cssClass", "btn-danger")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.clicked.connect(self._delete_selected)
+        head.addWidget(delete_btn)
         self._cols_combo = self._build_cols_combo()
         head.addWidget(self._cols_combo)
         self._auto_fit_btn = QPushButton("自适应列宽：关")
@@ -448,7 +468,7 @@ class FilterPage(QWidget):
         combo.setObjectName("ColsSelect")
         self._cols_model = QStandardItemModel(combo)
         hidden = self._hidden_columns()
-        all_item = QStandardItem("全部显示")
+        all_item = QStandardItem("全部隐藏" if not hidden else "全部显示")
         all_item.setCheckable(False)
         all_item.setEditable(False)
         self._cols_model.appendRow(all_item)
@@ -472,6 +492,7 @@ class FilterPage(QWidget):
             if self._cols_model.item(i + 1).checkState() == Qt.CheckState.Checked
         )
         self._cols_combo.setPlaceholderText(f"显示列 ({visible_n}/{len(DATA_COLUMNS)})")
+        self._cols_model.item(0).setText("全部隐藏" if visible_n == len(DATA_COLUMNS) else "全部显示")
 
     def eventFilter(self, obj, event) -> bool:
         """勾选列表项鼠标松开时切换勾选，并吞掉该事件使下拉保持展开。"""
@@ -486,11 +507,17 @@ class FilterPage(QWidget):
         idx: QModelIndex = view.indexAt(event.position().toPoint())
         if idx.isValid():
             if idx.row() == 0:
-                # 首项：全部显示
+                # 首项：状态切换——有列隐藏时全部显示，全部可见时全部隐藏
+                show_all = any(
+                    self._cols_model.item(i + 1).checkState() != Qt.CheckState.Checked
+                    for i in range(len(DATA_COLUMNS))
+                )
                 for i in range(len(DATA_COLUMNS)):
-                    self._cols_model.item(i + 1).setCheckState(Qt.CheckState.Checked)
-                    self._table.setColumnHidden(COL_DATA_START + i, False)
-                self._save_hidden_columns(set())
+                    self._cols_model.item(i + 1).setCheckState(
+                        Qt.CheckState.Checked if show_all else Qt.CheckState.Unchecked
+                    )
+                    self._table.setColumnHidden(COL_DATA_START + i, not show_all)
+                self._save_hidden_columns(set() if show_all else {key for _, key, _, _, _ in DATA_COLUMNS})
             else:
                 item = self._cols_model.itemFromIndex(idx)
                 data_row = idx.row() - 1  # 首项为功能项
@@ -540,7 +567,7 @@ class FilterPage(QWidget):
         # 税号列强制文本（防止 Excel 把 18 位信用代码转成科学计数法丢精度）；
         # 金额列尽量写成数字单元格便于后续计算。
         TAX_NO_KEYS = {"buyer_tax_no", "seller_tax_no"}
-        AMOUNT_KEYS = {"amount", "tax_amount", "total_amount"}
+        AMOUNT_KEYS = {"amount", "tax_amount", "total_amount", "unit_price"}
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Alignment, Font
@@ -639,6 +666,44 @@ class FilterPage(QWidget):
 
         QApplication.clipboard().setText("\t".join(cells))
         self._toast.show_message("整行数据已复制")
+
+    def _delete_selected(self) -> None:
+        """一键删除勾选的全部记录（含级联的字段/校验数据，逐条写审计日志）。
+
+        配合表头全选框使用即"删除全部"；确认后重新加载列表，保持与数据库一致。
+        """
+        ids = self._selected_doc_ids()
+        if not ids:
+            self._toast.show_message("请先勾选要删除的行")
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确认删除选中的 {len(ids)} 条记录及其解析数据？\n删除后可用原 PDF 重新导入。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        from sqlalchemy import select
+
+        from database.db import get_engine, make_session_factory
+        from models.document import AuditLog, Document
+
+        engine = get_engine(self._db_path)
+        factory = make_session_factory(engine)
+        deleted = 0
+        with factory() as session:
+            for doc in session.scalars(select(Document).where(Document.id.in_(ids))):
+                session.add(
+                    AuditLog(action="delete_document", detail=f"id={doc.id} name={doc.file_name} batch=1")
+                )
+                session.delete(doc)  # 字段/校验结果随级联删除
+                deleted += 1
+            session.commit()
+
+        self._select_all_btn.setChecked(False)  # 重置表头全选，避免刷新后勾选态残留
+        self.reload()
+        self._toast.show_message(f"已删除 {deleted} 条记录")
 
     def _delete_row(self, row: int) -> None:
         doc_id = self._table.item(row, COL_NAME).data(Qt.ItemDataRole.UserRole)

@@ -1,0 +1,190 @@
+{
+  "schema": "invoice",
+  "_comment": "发票 Base Schema（方案 §16）：定义『有哪些字段』（类型/严重程度）与各版式共用的 regions/table/结构/业务校验配置。版式模板（templates/*.json）用 extends: invoice 继承本文件，只声明『怎么找』；Variant 在模板里定义『哪些字段必须有』。字段合并规则：模板字段深覆盖 base 字段（模板只写定位键时继承类型/正则/严重程度）。",
+  "regions": {
+    "header": {
+      "start_y": 0,
+      "end_anchor": ["项目名称", "货物或应税劳务", "服务名称"]
+    },
+    "items": {
+      "start_anchor": ["项目名称", "货物或应税劳务", "服务名称"],
+      "end_anchor": ["合 计", "合计", "价税合计"]
+    },
+    "totals": {
+      "start_anchor": ["合 计", "合计"]
+    }
+  },
+  "table": {
+    "page": 0,
+    "columns": {
+      "name": {
+        "title": "项目名称",
+        "headers": ["项目名称", "货物或应税劳务", "服务名称"]
+      },
+      "construction_site": {
+        "title": "建筑服务发生地",
+        "headers": ["建筑服务发生地"]
+      },
+      "project_name": {
+        "title": "建筑项目名称",
+        "headers": ["建筑项目名称"]
+      },
+      "spec": {
+        "title": "规格型号",
+        "headers": ["规格型号"]
+      },
+      "unit": {
+        "title": "单位",
+        "headers": ["单位", "单 位"]
+      },
+      "quantity": {
+        "title": "数量",
+        "headers": ["数量", "数 量"],
+        "type": "decimal"
+      },
+      "unit_price": {
+        "title": "单价",
+        "headers": ["单价", "单 价"],
+        "type": "decimal"
+      },
+      "amount": {
+        "title": "金额",
+        "headers": ["金额", "金 额"],
+        "type": "decimal"
+      },
+      "tax_rate": {
+        "title": "税率",
+        "headers": ["税率/征收率", "税率", "征收率"],
+        "type": "rate"
+      },
+      "tax": {
+        "title": "税额",
+        "headers": ["税额", "税 额"],
+        "type": "decimal"
+      }
+    },
+    "stop_anchor": ["合 计", "合计", "价税合计", "建筑服务发生地", "建筑项目名称"],
+    "required_columns": ["name", "amount", "tax"],
+    "row_tolerance": 3
+  },
+  "structure": {
+    "item_table": {
+      "rows_field": "item_rows",
+      "required_cells": ["name", "amount"],
+      "column_fields": {
+        "金额": "item_amount_rows",
+        "税额": "item_tax_rows"
+      },
+      "required_columns": ["金额", "税额"],
+      "first_row_fields": ["item_name", "amount"]
+    }
+  },
+  "business_check": {
+    "rows_field": "item_rows",
+    "item": {
+      "name": "item_name",
+      "quantity": "quantity",
+      "unit_price": "unit_price",
+      "amount": "amount",
+      "tax_rate": "tax_rate",
+      "tax": "tax_amount"
+    },
+    "totals": {
+      "amount": "amount",
+      "tax": "tax_amount",
+      "grand": "total_amount"
+    }
+  },
+  "business_rules": [
+    {
+      "field": "total_amount",
+      "op": ">=",
+      "value": "0"
+    }
+  ],
+  "fields": {
+    "invoice_no": {
+      "type": "string",
+      "critical": true,
+      "pattern": "^\\d{8,20}$"
+    },
+    "invoice_date": {
+      "type": "date",
+      "critical": true
+    },
+    "buyer_name": {
+      "type": "string",
+      "pattern": "^[^：:]{4,}$"
+    },
+    "buyer_tax_no": {
+      "type": "string",
+      "pattern": "^[0-9A-Z]{15,20}$"
+    },
+    "seller_name": {
+      "type": "string",
+      "pattern": "^[^：:]{4,}$"
+    },
+    "seller_tax_no": {
+      "type": "string",
+      "pattern": "^[0-9A-Z]{15,20}$"
+    },
+    "item_name": {
+      "type": "string"
+    },
+    "spec_model": {
+      "type": "string",
+      "optional": true
+    },
+    "unit": {
+      "type": "string",
+      "optional": true
+    },
+    "quantity": {
+      "type": "string",
+      "optional": true
+    },
+    "unit_price": {
+      "type": "decimal",
+      "optional": true
+    },
+    "item_rows": {
+      "type": "string",
+      "optional": true
+    },
+    "item_amount_rows": {
+      "type": "string",
+      "optional": true
+    },
+    "item_tax_rows": {
+      "type": "string",
+      "optional": true
+    },
+    "construction_site": {
+      "type": "string",
+      "optional": true
+    },
+    "project_name": {
+      "type": "string",
+      "optional": true
+    },
+    "tax_rate": {
+      "type": "string",
+      "pattern": "^\\d+(\\.\\d+)?%$"
+    },
+    "amount": {
+      "type": "decimal",
+      "critical": true,
+      "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
+    },
+    "tax_amount": {
+      "type": "decimal",
+      "critical": true,
+      "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
+    },
+    "total_amount": {
+      "type": "decimal",
+      "critical": true,
+      "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
+    }
+  }
+}

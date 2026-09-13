@@ -1,6 +1,6 @@
-"""主窗口外壳：侧边栏 + 三个页面栈。
+"""主窗口外壳：侧边栏 + 四个页面栈。
 
-页面：文件上传与管理 / 数据筛选与管理 / 系统设置。
+页面：文件上传与管理 / PDF 编辑 / 数据筛选与管理 / 系统设置。
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QStackedWidget
 
 from ui.pages.filter_page import FilterPage
+from ui.pages.pdf_editor_page import PdfEditorPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.upload_page import UploadPage
 from ui.styles import make_app_icon
@@ -42,12 +43,14 @@ class MainWindow(QMainWindow):
 
         self._stack = QStackedWidget()
         self._upload_page = UploadPage(db_path)
+        self._editor_page = PdfEditorPage()
         self._filter_page = FilterPage(db_path)
         self._settings_page = SettingsPage()
 
         self._stack.addWidget(self._upload_page)   # index 0
-        self._stack.addWidget(self._filter_page)   # index 1
-        self._stack.addWidget(self._settings_page) # index 2
+        self._stack.addWidget(self._editor_page)   # index 1
+        self._stack.addWidget(self._filter_page)   # index 2
+        self._stack.addWidget(self._settings_page) # index 3
         right_l.addWidget(self._stack, 1)
         central_layout.addWidget(right, 1)
         self.setCentralWidget(central)
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _switch_page(self, key: str) -> None:
-        index = {"upload": 0, "filter": 1, "settings": 2}.get(key, 0)
+        index = {"upload": 0, "editor": 1, "filter": 2, "settings": 3}.get(key, 0)
         self._stack.setCurrentIndex(index)
         if key == "filter":
             self._filter_page.reload()

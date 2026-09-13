@@ -21,13 +21,14 @@ NAV_ITEMS = [
     ("📂 文件上传与管理", "upload"),
     ("🔍 数据筛选与管理", "filter"),
     ("⚙️ 系统设置", "settings"),
+    ("✏️ PDF 编辑", "editor"),
 ]
 
 
 class Sidebar(QFrame):
     """左侧深色导航栏（宽 220px，对应 .sidebar）。"""
 
-    page_selected = Signal(str)  # page key: upload / filter / settings
+    page_selected = Signal(str)  # page key: upload / filter / settings / editor
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

@@ -1,13 +1,23 @@
-"""字段规则验证：格式校验（正则/类型）+ 业务规则校验。"""
+"""字段规则验证：格式校验（正则/类型）+ 字段严重程度（required / critical）。
+
+严重程度（方案 §6）：
+  optional —— 缺失不算问题（原 optional 语义）；
+  required —— 缺失/失败转人工复核（默认：非 optional 即 required）；
+  critical —— 缺失/失败直接判整单 failed（关键字段：发票号码、价税合计等）。
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Callable
 
 from pdf.normalizers import normalize_amount, normalize_date
+
+SEVERITY_OPTIONAL = "optional"
+SEVERITY_REQUIRED = "required"
+SEVERITY_CRITICAL = "critical"
 
 
 @dataclass
@@ -53,18 +63,41 @@ _FORMAT_CHECKERS: dict[str, Callable[[str, dict[str, Any]], str | None]] = {
 }
 
 
+def field_severity(spec: dict[str, Any]) -> str:
+    """字段严重程度（缺省：非 optional 即 required）。"""
+    if spec.get("optional"):
+        return SEVERITY_OPTIONAL
+    if spec.get("critical"):
+        return SEVERITY_CRITICAL
+    return SEVERITY_REQUIRED
+
+
+def apply_optional(result: FieldResult, spec: dict[str, Any]) -> FieldResult:
+    """optional 字段未提取到值时视为"合法缺失"：清空失败标记（值仍为空）。
+
+    通用兜底模板用于兼容多种版式：某字段在部分版式里不存在（如建筑服务
+    发生地只在建筑服务发票里有）时，缺失不应拖垮整单解析；取到了值仍然
+    照常走格式化校验。
+    """
+    if spec.get("optional") and not result.normalized_value:
+        result.valid = True
+        result.errors.clear()
+    return result
+
+
 def validate_field(result: FieldResult, spec: dict[str, Any]) -> FieldResult:
     """按模板字段的 type/pattern 校验单个字段。"""
     if not result.normalized_value:
         result.fail("提取结果为空")
-        return result
+        return apply_optional(result, spec)
 
     ftype = spec.get("type", "string")
     checker = _FORMAT_CHECKERS.get(ftype)
     if checker:
         error = checker(result.normalized_value, spec)
         if error:
-            result.fail(error)
+            # 带上实际参与校验的值：原始值与归一化值可能不同，便于定位是哪个值不匹配
+            result.fail(f"{error}，校验值={result.normalized_value!r}")
     return result
 
 

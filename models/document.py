@@ -29,13 +29,18 @@ class Document(Base):
     template_id: Mapped[str | None] = mapped_column(String(100))
     template_version: Mapped[str | None] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
-    error_reason: Mapped[str | None] = mapped_column(Text)  # 人话错误原因（失败/待确认时）
+    error_reason: Mapped[str | None] = mapped_column(Text)  # 人话错误/警告原因（失败/待确认时）
+    # 规则式置信度（方案 §10/§31）：识别/解析/校验三维分开存 + 综合分，便于统计与审计
+    identify_confidence: Mapped[int | None] = mapped_column(Integer)
+    parse_confidence: Mapped[int | None] = mapped_column(Integer)
+    overall_confidence: Mapped[int | None] = mapped_column(Integer)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     fields: Mapped[list[ExtractedField]] = relationship(back_populates="document", cascade="all, delete-orphan")
     verifications: Mapped[list[VerificationResult]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    items: Mapped[list[ExtractedItem]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class ExtractedField(Base):
@@ -51,6 +56,31 @@ class ExtractedField(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     document: Mapped[Document] = relationship(back_populates="fields")
+
+
+class ExtractedItem(Base):
+    """明细行（Table Engine 输出，方案 §15）：行与列的关联在解析时已建立。
+
+    与 ExtractedField 分开存：明细是"一对多"结构，逐行落库后业务校验
+    （Σ明细金额≈合计金额）与 UI 明细展示都直接读这张表。
+    """
+
+    __tablename__ = "extracted_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    row_index: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str | None] = mapped_column(Text)
+    spec: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str | None] = mapped_column(Text)
+    quantity: Mapped[str | None] = mapped_column(Text)
+    unit_price: Mapped[str | None] = mapped_column(Text)
+    amount: Mapped[str | None] = mapped_column(Text)
+    tax_rate: Mapped[str | None] = mapped_column(Text)
+    tax: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    document: Mapped[Document] = relationship(back_populates="items")
 
 
 class VerificationResult(Base):

@@ -1,8 +1,12 @@
 {
-  "template": "invoice_v1",
+  "template": "invoice_generic",
   "mode": "dynamic",
   "extends": "invoice",
-  "_comment": "专属版式①：建筑服务数电票（带建筑服务发生地/建筑项目名称信息块）。字段类型/正则/严重程度与公共 regions/table 配置继承 templates/base/invoice.json，这里只声明『怎么找』；『哪些字段必须有』由 variants 按 detect 切换（带建筑服务信息块 → construction 变体必填）。识别为文档指纹打分（文本+锚点位置+表头结构+页面特征，0~100）。",
+  "identify": {
+    "fallback": true,
+    "fallback_detect": ["发票"]
+  },
+  "_comment": "通用兜底模板：专属模板全部淘汰时启用。fallback_detect 为弱关键词守卫，页面文本不含『发票』时不套用（避免误用于合同/其他文档）。识别为 fallback 的文档会降低 identify 置信度并进入人工复核；候选锚点/表头覆盖更多版式写法（货物或应税劳务、服务名称、统一社会信用代码等），明细同样走 Table Engine。字段类型与公共 regions/table 继承 templates/base/invoice.json。",
   "variants": {
     "construction": {
       "detect": {
@@ -10,21 +14,6 @@
       },
       "required_fields": ["construction_site", "project_name"]
     }
-  },
-  "identify": {
-    "priority": 100,
-    "text": {
-      "must": ["建筑服务发生地", "建筑项目名称"],
-      "any": ["电子发票", "增值税专用发票", "发票号码"]
-    },
-    "anchors": [
-      {"text": "发票号码", "area": "top_right"},
-      {"text": "建筑服务发生地", "area": "left"},
-      {"text": "建筑项目名称", "area": "left"}
-    ],
-    "table_headers": ["项目名称", "数量", "金额", "税率/征收率", "税额"],
-    "page_size": [595.32, 841.92],
-    "min_score": 60
   },
   "fields": {
     "invoice_no": {
@@ -44,7 +33,7 @@
     "buyer_name": {
       "page": 0,
       "region": "header",
-      "anchor": "名称：",
+      "anchor": ["名称：", "名称:"],
       "direction": "right",
       "x_max": 300,
       "verify": true
@@ -52,7 +41,7 @@
     "buyer_tax_no": {
       "page": 0,
       "region": "header",
-      "anchor": "纳税人识别号",
+      "anchor": ["纳税人识别号", "统一社会信用代码"],
       "direction": "right",
       "x_max": 300,
       "verify": true
@@ -60,7 +49,7 @@
     "seller_name": {
       "page": 0,
       "region": "header",
-      "anchor": "名称：",
+      "anchor": ["名称：", "名称:"],
       "direction": "right",
       "x_min": 300,
       "verify": true
@@ -68,7 +57,7 @@
     "seller_tax_no": {
       "page": 0,
       "region": "header",
-      "anchor": "纳税人识别号",
+      "anchor": ["纳税人识别号", "统一社会信用代码"],
       "direction": "right",
       "x_min": 300,
       "verify": true
@@ -76,11 +65,10 @@
     "item_name": {
       "page": 0,
       "region": "items",
-      "anchor": "项目名称",
+      "anchor": ["货物或应税劳务", "项目名称", "服务名称"],
       "direction": "below",
-      "max_distance": 30,
-      "pattern": "^\\*.+\\*.+$",
-      "verify": true
+      "same_word": false,
+      "max_distance": 30
     },
     "spec_model": {
       "page": 0,
@@ -117,7 +105,7 @@
     "item_rows": {
       "page": 0,
       "region": "items",
-      "anchor": "项目名称",
+      "anchor": ["项目名称", "货物或应税劳务", "服务名称"],
       "direction": "below",
       "below_mode": "count",
       "max_distance": 800,
@@ -149,8 +137,7 @@
       "direction": "below",
       "max_distance": 90,
       "below_mode": "merge",
-      "stop_anchor": ["建筑项目名称", "合 计", "合计", "价税合计"],
-      "verify": true
+      "stop_anchor": ["建筑项目名称", "合 计", "合计", "价税合计"]
     },
     "project_name": {
       "page": 0,
@@ -158,22 +145,14 @@
       "direction": "below",
       "max_distance": 90,
       "below_mode": "merge",
-      "stop_anchor": ["合 计", "合计", "价税合计"],
-      "verify": true
+      "stop_anchor": ["合 计", "合计", "价税合计"]
     },
     "tax_rate": {
       "page": 0,
       "region": "items",
       "anchor": ["税率/征收率", "税率", "征收率"],
       "direction": "below",
-      "max_distance": 30,
-      "verify": true
-    },
-    "total_amount": {
-      "page": 0,
-      "anchor": ["（小写）", "(小写)"],
-      "direction": "right",
-      "verify": true
+      "max_distance": 30
     },
     "amount": {
       "page": 0,
@@ -193,7 +172,7 @@
     "tax_amount": {
       "page": 0,
       "region": "totals",
-      "anchor": ["税 额", "税额", "税"],
+      "anchor": ["税额", "税 额", "税"],
       "anchor_span": true,
       "direction": "below",
       "max_distance": 800,
@@ -202,6 +181,12 @@
       },
       "below_mode": "row",
       "pick": "last",
+      "verify": true
+    },
+    "total_amount": {
+      "page": 0,
+      "anchor": ["（小写）", "(小写)"],
+      "direction": "right",
       "verify": true
     }
   }

@@ -8,7 +8,8 @@
 
 修复后行为：
   - 候选按"与锚点的列重叠质量"分层，严格同列优先、擦边候选兜底；
-  - 模板 amount/tax_amount 用 max_distance=800 + pick=last 取该列最下方的合计值。
+  - 模板 amount/tax_amount 用 max_distance=800 + pick=last 取该列最下方的合计值；
+  - 明细逐行由 Table Engine 重建（合计行 = 各行之和，业务数学校验通过）。
 
 运行：.venv/Scripts/python.exe -m pytest tests/test_invoice_multiline.py -v
 """
@@ -16,6 +17,7 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -31,8 +33,31 @@ from services.pdf_service import PdfService
 PAGE_W, PAGE_H = 595.32, 841.92
 
 
-def _make_invoice(path: Path, rows: int) -> None:
-    """生成仿真数电票（建筑服务版式）：rows 行商品明细，合计行随行数下移。"""
+def _make_invoice(
+    path: Path,
+    rows: int,
+    *,
+    wrap_project_name: bool = False,
+    wrap_line_gap: float = 12.0,
+    with_currency_symbol: bool = True,
+    split_decimal: bool = False,
+) -> None:
+    """生成仿真数电票（建筑服务版式）：rows 行商品明细，合计行随行数下移。
+
+    wrap_project_name=True 时把建筑项目名称折成三行（模拟长文案单元格），
+    wrap_line_gap 控制折行行距，用于验证多行值的合并取值。
+    with_currency_symbol=False 模拟金额列不带 ¥ 符号的实票（只在明细/合计
+    列写纯数字），用于验证金额字段的取值不依赖货币符号。
+    split_decimal=True 模拟实票里"小数点后有空隙"的切词（"118812. 57"），
+    用于验证数值多段拼接。
+    """
+
+    def money(value: str) -> str:
+        if not split_decimal:
+            return value
+        int_part, _, dec_part = value.partition(".")
+        return f"{int_part}. {dec_part}"
+
     doc = pymupdf.open()
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
 
@@ -65,23 +90,41 @@ def _make_invoice(path: Path, rows: int) -> None:
         page.insert_text((60, y), "*建筑服务*劳务工程款", fontsize=9, fontname="china-s")
         page.insert_text((230, y), "1", fontsize=9)
         page.insert_text((290, y), "73933.20", fontsize=9)
-        page.insert_text((350, y), "73933.20", fontsize=9)
+        page.insert_text((350, y), money("73933.20"), fontsize=9)
         page.insert_text((420, y), "3%", fontsize=9)
-        page.insert_text((500, y), "2218.00", fontsize=9)
+        page.insert_text((500, y), money("2218.00"), fontsize=9)
         y += 22
 
     # 建筑服务信息（明细区下方，标签与值分行）
     page.insert_text((60, y + 20), "建筑服务发生地：", fontsize=9, fontname="china-s")
     page.insert_text((60, y + 32), "福建省厦门市湖里区仙岳医院院区", fontsize=9, fontname="china-s")
     page.insert_text((60, y + 66), "建筑项目名称：", fontsize=9, fontname="china-s")
-    page.insert_text((60, y + 78), "厦门市仙岳医院改扩建项目地下室及上部主体工程", fontsize=9, fontname="china-s")
+    project_lines = (
+        ("厦门市仙岳医院", "改扩建项目地下室", "及上部主体工程")
+        if wrap_project_name
+        else ("厦门市仙岳医院改扩建项目地下室及上部主体工程",)
+    )
+    for offset, part in enumerate(project_lines):
+        page.insert_text((60, y + 78 + offset * wrap_line_gap), part, fontsize=9, fontname="china-s")
 
-    # 合计行 / 价税合计
-    total_y = y + 110
+    # 合计行 / 价税合计（折行后需相应下移，保持与明细区的间距）
+    # 合计 = 各行之和（发票数据自洽，业务数学校验才有意义）
+    total_amount = Decimal("73933.20") * rows
+    total_tax = Decimal("2218.00") * rows
+    grand_total = total_amount + total_tax
+    last_value_y = y + 78 + (len(project_lines) - 1) * wrap_line_gap
+    total_y = max(y + 110, last_value_y + 30)
+    symbol = "¥" if with_currency_symbol else ""
     page.insert_text((60, total_y), "合 计", fontsize=9, fontname="china-s")
-    page.insert_text((350, total_y), "¥73933.20", fontsize=9, fontname="china-s")
-    page.insert_text((500, total_y), "¥2218.00", fontsize=9, fontname="china-s")
-    page.insert_text((360, total_y + 30), "（小写）¥76151.20", fontsize=9, fontname="china-s")
+    page.insert_text(
+        (350, total_y), f"{symbol}{money(f'{total_amount:.2f}')}", fontsize=9, fontname="china-s"
+    )
+    page.insert_text(
+        (500, total_y), f"{symbol}{money(f'{total_tax:.2f}')}", fontsize=9, fontname="china-s"
+    )
+    page.insert_text(
+        (360, total_y + 30), f"（小写）{symbol}{grand_total:.2f}", fontsize=9, fontname="china-s"
+    )
 
     doc.save(path)
     doc.close()
@@ -93,35 +136,59 @@ def invoice_engine() -> TemplateEngine:
     return TemplateEngine(Path(__file__).resolve().parents[1] / "templates")
 
 
-def _process(pdf_path: Path, engine: TemplateEngine):
-    """跑完整管线，返回 (doc, {字段: 归一化值}, {字段: 交叉验证是否一致})。"""
+def _process(pdf_path: Path, engine: TemplateEngine, *, cross_verify: bool = True):
+    """跑完整管线，返回 (doc, {字段: 归一化值}, {字段: 交叉验证是否一致}, items 明细行)。
+
+    默认 cross_verify=True：本文件重点验证"双引擎取值一致"这一回归保障；
+    Lazy 触发策略（默认自动）另有专项测试（test_lazy_cross_validation.py）。
+    """
     db_engine = get_engine(":memory:")
     init_db(db_engine)
     factory = make_session_factory(db_engine)
     service = PdfService(engine)
     with factory() as session:
-        doc = service.process_document(session, str(pdf_path))
+        doc = service.process_document(session, str(pdf_path), cross_verify=cross_verify)
         values = {f.field_name: f.normalized_value for f in doc.fields}
         matched = {v.field_name: v.matched for v in doc.verifications}
-        return doc, values, matched
+        items = [
+            (it.row_index, it.name, it.quantity, it.unit_price, it.amount, it.tax_rate, it.tax)
+            for it in doc.items
+        ]
+        return doc, values, matched, items
 
 
 # ------------------------------------------------- 端到端：多行明细
 
 @pytest.mark.parametrize("rows", [1, 3, 5, 12])
 def test_multiline_invoice_parses_with_accumulated_totals(tmp_path, invoice_engine, rows):
-    """任意明细行数下（合计行随之下移）应解析成功，合计字段取合计行而非明细行。"""
+    """任意明细行数下（合计行随之下移）字段仍取对位置：合计字段取合计行而非明细行。
+
+    多行明细属**正常发票结构**（方案 §7）：Table Engine 逐行重建 items，
+    全部行都提取，不再有"仅提取首行"告警，整单保持 success。
+    """
     pdf = tmp_path / f"invoice_{rows}rows.pdf"
     _make_invoice(pdf, rows)
 
-    doc, values, matched = _process(pdf, invoice_engine)
+    doc, values, matched, items = _process(pdf, invoice_engine)
 
     assert doc.status == "success", doc.error_reason
-    assert values["amount"] == "73933.20"
-    # 回归点：修复前 tax_amount 会借用金额列的候选取成 73933.20
-    assert values["tax_amount"] == "2218.00"
-    assert values["total_amount"] == "76151.20"
+    assert doc.error_reason is None
+    # 明细行数（标注用，随导出带出）与逐行 items 一致
+    assert values["item_rows"] == str(rows)
+    assert len(items) == rows
+    assert [item[0] for item in items] == list(range(1, rows + 1))
+    # 明细首行字段
     assert values["item_name"] == "*建筑服务*劳务工程款"
+    assert values["quantity"] == "1"
+    assert values["unit_price"] == "73933.20"
+    # 该版式没有规格型号/单位列 → 可选字段留空
+    assert values["spec_model"] is None
+    assert values["unit"] is None
+    # 合计字段仍取合计行（合计 = 各行之和：逐行 items 的业务数学校验据此通过）
+    assert Decimal(values["amount"]) == Decimal("73933.20") * rows
+    # 回归点：修复前 tax_amount 会借用金额列的候选取成 73933.20
+    assert Decimal(values["tax_amount"]) == Decimal("2218.00") * rows
+    assert Decimal(values["total_amount"]) == Decimal("76151.20") * rows
     assert values["tax_rate"] == "3%"
     assert all(matched.values()), matched
 
@@ -132,9 +199,60 @@ def test_multiline_cross_verification_agrees(tmp_path, invoice_engine, rows):
     pdf = tmp_path / f"invoice_cross_{rows}rows.pdf"
     _make_invoice(pdf, rows)
 
-    doc, values, matched = _process(pdf, invoice_engine)
+    doc, values, matched, items = _process(pdf, invoice_engine)
 
     assert matched, "关键字段必须产生交叉验证记录"
+    assert all(matched.values()), matched
+
+
+# ------------------------------------------------- 金额列不带货币符号
+
+def test_amounts_without_currency_symbol_still_parsed(tmp_path, invoice_engine):
+    """金额列不带 ¥ 符号（实票常见）时，金额/税额/价税合计仍应取到合计行的值。"""
+    pdf = tmp_path / "invoice_no_symbol.pdf"
+    _make_invoice(pdf, rows=1, with_currency_symbol=False)
+
+    doc, values, matched, items = _process(pdf, invoice_engine)
+
+    assert values["amount"] == "73933.20"
+    assert values["tax_amount"] == "2218.00"
+    assert values["total_amount"] == "76151.20"
+    assert doc.status == "success", doc.error_reason
+    assert all(matched.values()), matched
+
+
+# ------------------------------------------------- 金额被切词成多段
+
+def test_amount_split_by_gap_still_parsed(tmp_path, invoice_engine):
+    """金额小数点后有间隙被切成多段（"73933." + "20"）时仍应取到合计行的值。"""
+    pdf = tmp_path / "invoice_split_decimal.pdf"
+    _make_invoice(pdf, rows=1, split_decimal=True)
+
+    doc, values, matched, items = _process(pdf, invoice_engine)
+
+    assert values["amount"] == "73933.20"
+    assert values["tax_amount"] == "2218.00"
+    assert doc.status == "success", doc.error_reason
+    assert all(matched.values()), matched
+
+
+# ------------------------------------------------- 建筑服务字段：长文案折行
+
+@pytest.mark.parametrize("line_gap", [12.0, 16.0, 20.0])
+def test_wrapped_project_name_merged_completely(tmp_path, invoice_engine, line_gap):
+    """建筑项目名称文案过长折成三行时，三行必须合并为完整值：
+    既不能截断（旧实现 max_distance=30 会丢掉靠下的行），
+    也不能把后面的"合 计"行并进来。
+    """
+    pdf = tmp_path / f"invoice_wrapped_{int(line_gap)}.pdf"
+    _make_invoice(pdf, rows=1, wrap_project_name=True, wrap_line_gap=line_gap)
+
+    doc, values, matched, items = _process(pdf, invoice_engine)
+
+    assert values["project_name"] == "厦门市仙岳医院改扩建项目地下室及上部主体工程"
+    assert "合计" not in (values["project_name"] or "")
+    assert values["construction_site"] == "福建省厦门市湖里区仙岳医院院区"
+    assert doc.status == "success", doc.error_reason
     assert all(matched.values()), matched
 
 

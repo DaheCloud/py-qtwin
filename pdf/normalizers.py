@@ -33,6 +33,9 @@ def normalize_amount(value: str | Decimal | None) -> Decimal | None:
         .replace("¥", "")
         .replace(",", "")
         .replace("元", "")
+        # 文本层可能带字间距空格（"118812. 57"）
+        .replace(" ", "")
+        .replace("\u3000", "")
         .strip()
     )
     text = re.sub(r"^[+-]?", lambda m: m.group(0), text)

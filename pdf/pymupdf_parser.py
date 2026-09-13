@@ -21,6 +21,14 @@ class ParseReport:
     fields: dict[str, FieldResult] = field(default_factory=dict)
     business_errors: list[str] = field(default_factory=list)
     used_fallback: bool = False
+    # 固定模板字段失败后由锚点规则兜底救回的字段名（审计用）
+    rescued_fields: list[str] = field(default_factory=list)
+    # 表格重建结果（方案 §15）：items 的行关联关系在解析时已建立
+    items: list[dict[str, Any]] = field(default_factory=list)
+    # 完整表格重建结果（TableResult，含列边界/结构问题，审计与结构校验用）
+    table: Any | None = None
+    # 由表格结果回填的字段名（审计用）
+    table_applied: list[str] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:

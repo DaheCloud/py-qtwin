@@ -1,8 +1,8 @@
 {
-  "template": "invoice_v1",
+  "template": "invoice_v2",
   "mode": "dynamic",
   "extends": "invoice",
-  "_comment": "专属版式①：建筑服务数电票（带建筑服务发生地/建筑项目名称信息块）。字段类型/正则/严重程度与公共 regions/table 配置继承 templates/base/invoice.json，这里只声明『怎么找』；『哪些字段必须有』由 variants 按 detect 切换（带建筑服务信息块 → construction 变体必填）。识别为文档指纹打分（文本+锚点位置+表头结构+页面特征，0~100）。",
+  "_comment": "专属版式②：增值税专用发票数电票（明细表头含 规格型号/单位 列，无建筑服务信息块时也适用）。字段类型/正则/严重程度与公共 regions/table 配置继承 templates/base/invoice.json，这里只声明『怎么找』；variants 按 detect 切换：文档带建筑服务信息块时 construction_site/project_name 转必填。识别为文档指纹打分（文本+锚点位置+表头结构+页面特征）。",
   "variants": {
     "construction": {
       "detect": {
@@ -12,17 +12,15 @@
     }
   },
   "identify": {
-    "priority": 100,
+    "priority": 10,
     "text": {
-      "must": ["建筑服务发生地", "建筑项目名称"],
-      "any": ["电子发票", "增值税专用发票", "发票号码"]
+      "must": ["增值税专用发票"],
+      "any": ["电子发票", "规格型号"]
     },
     "anchors": [
-      {"text": "发票号码", "area": "top_right"},
-      {"text": "建筑服务发生地", "area": "left"},
-      {"text": "建筑项目名称", "area": "left"}
+      {"text": "发票号码", "area": "top_right"}
     ],
-    "table_headers": ["项目名称", "数量", "金额", "税率/征收率", "税额"],
+    "table_headers": ["项目名称", "规格型号", "单位", "数量", "单价", "金额", "税率/征收率", "税额"],
     "page_size": [595.32, 841.92],
     "min_score": 60
   },
@@ -149,8 +147,7 @@
       "direction": "below",
       "max_distance": 90,
       "below_mode": "merge",
-      "stop_anchor": ["建筑项目名称", "合 计", "合计", "价税合计"],
-      "verify": true
+      "stop_anchor": ["建筑项目名称", "合 计", "合计", "价税合计"]
     },
     "project_name": {
       "page": 0,
@@ -158,8 +155,7 @@
       "direction": "below",
       "max_distance": 90,
       "below_mode": "merge",
-      "stop_anchor": ["合 计", "合计", "价税合计"],
-      "verify": true
+      "stop_anchor": ["合 计", "合计", "价税合计"]
     },
     "tax_rate": {
       "page": 0,

@@ -312,6 +312,14 @@ QPushButton[cssClass="btn-success"] {{
 QPushButton[cssClass="btn-success"]:hover {{
     background: #15803d;
 }}
+QPushButton[cssClass="btn-danger"] {{
+    background: {t['RED']};
+    color: #ffffff;
+    border: none;
+}}
+QPushButton[cssClass="btn-danger"]:hover {{
+    background: #dc2626;
+}}
 QPushButton[cssClass="btn-default"] {{
     background: {t['BG_CARD']};
     color: {t['BTN_DEFAULT_TEXT']};
@@ -551,6 +559,12 @@ QProgressBar::chunk {{
 /* ================ PDF 预览 ================ */
 #PdfPreview {{
     background: #475569;
+    border-radius: 6px;
+}}
+/* PDF 编辑画布：深灰底衬托白色页面 */
+#PdfCanvas {{
+    background: #475569;
+    border: 1px solid {t['BORDER']};
     border-radius: 6px;
 }}
 """
