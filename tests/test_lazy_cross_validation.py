@@ -162,6 +162,21 @@ class TestPrecheck:
         assert pre.ok and pre.has_text and not pre.needs_ocr
         assert pre.as_dict()["page_size"] == [595.32, 841.92]
 
+    def test_scanned_first_page_with_text_second_page(self, tmp_path):
+        """首页是扫描图/图片页、次页有文本 → 不误判为扫描件挂起 OCR（多页判定）。"""
+        pdf = tmp_path / "cover_scan.pdf"
+        doc = pymupdf.open()
+        page1 = doc.new_page(width=595.32, height=841.92)
+        page1.draw_rect(pymupdf.Rect(60, 60, 500, 400))
+        page2 = doc.new_page(width=595.32, height=841.92)
+        page2.insert_text((60, 60), "电子发票（普通发票）", fontsize=16, fontname="china-s")
+        doc.save(pdf)
+        doc.close()
+
+        pre = precheck_document(str(pdf))
+
+        assert pre.ok and pre.has_text and not pre.needs_ocr
+
     def test_broken_pdf_reported(self, tmp_path):
         path = tmp_path / "broken.pdf"
         path.write_bytes(b"this is not a pdf at all")

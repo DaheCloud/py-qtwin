@@ -256,6 +256,102 @@ def test_wrapped_project_name_merged_completely(tmp_path, invoice_engine, line_g
     assert all(matched.values()), matched
 
 
+# ------------------------------------------------- 跨页续表（合计行在第 2 页）
+
+
+def _make_cross_page_invoice(path: Path) -> None:
+    """跨页续表发票：第 1 页只有头部 + 表头 + 2 行明细（无合计行）；
+    第 2 页续 1 行明细 + 合计行 + 价税合计。
+    合计 = 3 行之和：73933.20 + 1200.00 + 300.00 = 75433.20（税 2263.00）。
+    """
+    doc = pymupdf.open()
+    page1 = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page1.insert_text((60, 60), "电子发票（普通发票）", fontsize=16, fontname="china-s")
+    page1.insert_text((330, 90), "发票号码：", fontsize=10, fontname="china-s")
+    page1.insert_text((395, 90), "26942000000871475416", fontsize=10)
+    page1.insert_text((330, 110), "开票日期：", fontsize=10, fontname="china-s")
+    page1.insert_text((395, 110), "2026年09月09日", fontsize=10, fontname="china-s")
+    page1.insert_text((60, 160), "名称：", fontsize=10, fontname="china-s")
+    page1.insert_text((95, 160), "中磐建设集团有限公司", fontsize=10, fontname="china-s")
+    page1.insert_text((60, 178), "纳税人识别号：", fontsize=10, fontname="china-s")
+    page1.insert_text((135, 178), "914114005698015827", fontsize=10)
+    page1.insert_text((330, 160), "名称：", fontsize=10, fontname="china-s")
+    page1.insert_text((365, 160), "厦门仪翔建设工程有限公司", fontsize=10, fontname="china-s")
+    page1.insert_text((330, 178), "纳税人识别号：", fontsize=10, fontname="china-s")
+    page1.insert_text((405, 178), "913502000658790529", fontsize=10)
+
+    header_y = 260
+    for x, text in [
+        (60, "项目名称"),
+        (230, "数量"),
+        (290, "单价"),
+        (350, "金额"),
+        (420, "税率/征收率"),
+        (500, "税额"),
+    ]:
+        page1.insert_text((x, header_y), text, fontsize=9, fontname="china-s")
+    y = 282
+    for name, price, tax in (
+        ("*建筑服务*劳务工程款", "73933.20", "2218.00"),
+        ("*建筑服务*材料款", "1200.00", "36.00"),
+    ):
+        page1.insert_text((60, y), name, fontsize=9, fontname="china-s")
+        page1.insert_text((230, y), "1", fontsize=9)
+        page1.insert_text((290, y), price, fontsize=9)
+        page1.insert_text((350, y), price, fontsize=9)
+        page1.insert_text((420, y), "3%", fontsize=9)
+        page1.insert_text((500, y), tax, fontsize=9)
+        y += 22
+
+    page2 = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page2.insert_text((60, 80), "*建筑服务*安装款", fontsize=9, fontname="china-s")
+    page2.insert_text((230, 80), "1", fontsize=9)
+    page2.insert_text((290, 80), "300.00", fontsize=9)
+    page2.insert_text((350, 80), "300.00", fontsize=9)
+    page2.insert_text((420, 80), "3%", fontsize=9)
+    page2.insert_text((500, 80), "9.00", fontsize=9)
+    total_y = 140
+    page2.insert_text((60, total_y), "合 计", fontsize=9, fontname="china-s")
+    page2.insert_text((350, total_y), "¥75433.20", fontsize=9, fontname="china-s")
+    page2.insert_text((500, total_y), "¥2263.00", fontsize=9, fontname="china-s")
+    page2.insert_text((360, total_y + 30), "（小写）¥77696.20", fontsize=9, fontname="china-s")
+    # 建筑服务信息块（跨页：备注区随合计行落在第 2 页）
+    page2.insert_text((60, 220), "建筑服务发生地：", fontsize=9, fontname="china-s")
+    page2.insert_text((60, 232), "福建省厦门市思明区仙岳医院", fontsize=9, fontname="china-s")
+    page2.insert_text((60, 266), "建筑项目名称：", fontsize=9, fontname="china-s")
+    page2.insert_text((60, 278), "厦门市仙岳医院改扩建项目", fontsize=9, fontname="china-s")
+
+    doc.save(path)
+    doc.close()
+
+
+def test_cross_page_invoice_totals_on_second_page(tmp_path, invoice_engine):
+    """跨页续表：明细表在第 1 页未结束、合计行与信息块在第 2 页。
+
+    表格引擎向第 2 页拼行（items 3 行）；amount/tax_amount 的锚点在第 1 页
+    表头、值在第 2 页合计行——第 1 页 totals 区域不可解析（明细行错值不可信，
+    跳过），由跨页画布兜底取到合计行；信息块字段由页序兜底在第 2 页取到。
+    """
+    pdf = tmp_path / "cross_page.pdf"
+    _make_cross_page_invoice(pdf)
+
+    doc, values, matched, items = _process(pdf, invoice_engine)
+
+    assert doc.status == "success", doc.error_reason
+    assert doc.template_id == "invoice_v1"  # 信息块在第 2 页也能命中专属指纹
+    assert len(items) == 3
+    assert items[2][1] == "*建筑服务*安装款"
+    assert items[2][4] == "300.00"
+    # 合计字段取第 2 页的合计行（= 3 行之和，业务数学校验据此通过）
+    assert Decimal(values["amount"]) == Decimal("75433.20")
+    assert Decimal(values["tax_amount"]) == Decimal("2263.00")
+    assert values["total_amount"] == "77696.20"
+    assert values["item_rows"] == "3"
+    # 信息块字段跨页取值
+    assert values["construction_site"] == "福建省厦门市思明区仙岳医院"
+    assert values["project_name"] == "厦门市仙岳医院改扩建项目"
+
+
 # ------------------------------------------------- 引擎：候选分层与 pick
 
 def test_strict_same_column_priority_over_edge_overlap():

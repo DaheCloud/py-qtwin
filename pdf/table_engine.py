@@ -22,8 +22,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from pdf.normalizers import normalize_amount, normalize_text
 from pdf.validators import FieldResult, validate_field
@@ -56,8 +57,14 @@ FIELD_BINDINGS: dict[str, str] = {
 # 空单元格占位符（"—"、"－"等）
 _PLACEHOLDER_CHARS = set("—–-－ \u3000")
 
-# "短文本即视为可信主数据"的长度上限（"1批"/"项"这类非纯数字但合法的单元格值）
-_SHORT_CELL_LIMIT = 8
+# "短文本即视为可信主数据"的形态：数字起头 + 至多 2 个非数字字符（"1批"/"1.5件"）。
+# 不能用"长度 ≤ N"粗判：重复表头的"数 量"、页脚"1/2"都会被误判为数据行。
+_SHORT_NUMERIC_LIKE = re.compile(r"[\d.,]+\s*[%°]?\s*[^\d\s]{0,2}")
+
+# 页脚噪声行（整行都匹配才算）：页码 "1/2"、"第 1 页 共 2 页"、"下载次数" 等
+_PAGE_FOOTER = re.compile(
+    r"^(?:第\s*\d+\s*页|共\s*\d+\s*页|\d+\s*[/／]\s*\d+|下载次数.*|[-—\s]*\d+[-—\s]*)$"
+)
 
 # 首列/末列边缘余量（pt，约 2~3 倍字高）：收口表格左右边界，
 # 避免表格外的备注/序号/页边文本被无限边界吸进首列/末列
@@ -181,7 +188,71 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
     return result
 
 
-# ---------------------------------------------------------------- 表头与列
+def extract_table_multipage(
+    word_pages: Iterator[list[Word]], config: dict[str, Any]
+) -> TableResult:
+    """跨页明细表：首页正常重建；首页表格贴到页底（未命中 stop_anchor）
+    时，向后续页继续拼行（明细表跨页的发票/销货清单）。
+
+    后续页复用首页的列边界（表头通常不重复出现），行号接续首页编号；
+    逐页拼接直到：某页命中 stop_anchor（合计行，表格结束）或某页拼不出
+    明细行（表格已结束）。word_pages 为惰性页词表序列（首页在前）。
+    """
+    iterator = iter(word_pages)
+    first = next(iterator, None)
+    if first is None:
+        result = TableResult(columns=_columns_from_config(config))
+        result.issues.append("table_not_configured")
+        return result
+
+    result = extract_table(first, config)
+    if result.header_y is None or result.stop_y is not None:
+        return result
+
+    header_texts = {
+        col.header.text.replace(" ", "")
+        for col in result.columns.values()
+        if col.header is not None
+    }
+    suffix = bool(config.get("suffix_continuation", True))
+
+    for words in iterator:
+        stop_y = find_stop_y(words, config.get("stop_anchor"), after_y=0.0)
+        region = [w for w in words if stop_y is None or w.y0 < stop_y - _EPS]
+        rows = group_rows(region, tolerance=_row_tolerance(words, config))
+
+        # 后续页的噪声行：重复表头行（表头底部作为区域起点，其上方的页眉
+        # 一并排除）、页脚行。不做这层过滤时，表头文字会因"短文本即数据"
+        # 被当成一条垃圾明细，页眉会被并进下一条明细的名称。
+        kept: list[list[Word]] = []
+        header_bottom: float | None = None
+        for row in rows:
+            if _is_page_footer_row(row):
+                continue
+            if _looks_like_header_row(row, header_texts, result.columns):
+                bottom = max(w.y1 for w in row)
+                header_bottom = bottom if header_bottom is None else min(header_bottom, bottom)
+                continue
+            kept.append(row)
+        if header_bottom is not None:
+            kept = [row for row in kept if row[0].y0 >= header_bottom - _EPS]
+
+        new_items, trailing = _build_items(
+            kept, result.columns, suffix_continuation=suffix, index_offset=len(result.items)
+        )
+        if trailing and "table_trailing_rows" not in result.issues:
+            result.issues.append("table_trailing_rows")
+        if new_items:
+            result.items.extend(new_items)
+            result.physical_rows += len(kept)
+        if stop_y is not None:
+            # 合计行在本页：表格闭合。明细先并入再收尾——"明细全在第 1 页、
+            # 合计行在第 2 页"时本页没有新明细，但表格确实已闭合（审计口径）
+            result.stop_y = stop_y
+            break
+        if not new_items:
+            break  # 该页没有明细行：表格已结束
+    return result
 
 
 @dataclass(frozen=True)
@@ -380,6 +451,7 @@ def _build_items(
     columns: dict[str, TableColumn],
     *,
     suffix_continuation: bool = True,
+    index_offset: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, list[Word]]]:
     """物理行 → 逻辑行 → items（方案 §12-§14）。
 
@@ -404,6 +476,8 @@ def _build_items(
                 cells[key].append(word)
         if not any(cells.values()):
             continue
+        if _is_page_footer_row(row):
+            continue  # 页脚噪声（页码等）：单页贴页底时同样要丢弃
         if not _has_data(cells, columns):
             for key, words in cells.items():
                 if words:
@@ -411,7 +485,7 @@ def _build_items(
             continue
         merged = {key: pending.get(key, []) + cells.get(key, []) for key in columns}
         pending = {}
-        items.append(_build_item(merged, columns, index=len(items) + 1))
+        items.append(_build_item(merged, columns, index=len(items) + 1 + index_offset))
 
     if pending:
         string_keys = [key for key, col in columns.items() if col.type == "string"]
@@ -446,8 +520,9 @@ def _has_data(cells: dict[str, list[Word]], columns: dict[str, TableColumn]) -> 
     """该物理行是否包含"可信的主数据"（数量/单价/金额/税额）。
 
     行级合理性守卫：只有名称/规格等跨行单元格的行不算数据行；主数据列里
-    出现明显不是数值的长文本（如表格下方信息块的说明文字落进数值列）也不
-    算——避免把版式噪声并成一条明细。短文本（"1批"、"项"）仍视为数据。
+    出现明显不是数值的文本也不算——包括表格下方信息块的长说明文字、
+    重复表头的"数 量"、页脚的"1/2"。只有"数字起头 + 至多 2 个非数字字符"
+    （"1批"/"1.5件"）这类合法的非纯数字单元格才仍视为数据。
     """
     for key in DATA_COLUMNS:
         if key not in columns:
@@ -460,9 +535,60 @@ def _has_data(cells: dict[str, list[Word]], columns: dict[str, TableColumn]) -> 
             continue
         if normalize_amount(text) is not None:
             return True
-        if len(text) <= _SHORT_CELL_LIMIT:
+        if _SHORT_NUMERIC_LIKE.fullmatch(text):
             return True
     return False
+
+
+def _is_page_footer_row(row: list[Word]) -> bool:
+    """整行都是页脚噪声（页码/"第 N 页 共 M 页"/"下载次数" 等）→ 丢弃。"""
+    texts = [w.text.strip() for w in row if w.text.strip()]
+    return bool(texts) and all(_PAGE_FOOTER.fullmatch(text) for text in texts)
+
+
+def _looks_like_header_row(
+    row: list[Word], header_texts: set[str], columns: dict[str, TableColumn]
+) -> bool:
+    """该物理行是否像"重复表头行"（跨页续表的后续页常重复表头）。
+
+    双判据（都必须"行内没有可解析数值"，避免误伤真实明细）：
+      · 文本判据：行内多数词的文本（去空格）命中首页表头词；
+      · 位置判据：行内多数词落在表头列中心附近，且覆盖 ≥2 个不同列
+        （覆盖拆词表头：第 2 页"数"+"量"两个词与首页"数 量"文本不同，
+        但位置仍在数量列）。单列折行行（如只有名称的行）不会被位置判据误伤。
+    """
+    if not row:
+        return False
+    for key in DATA_COLUMNS:
+        col = columns.get(key)
+        if col is None or not col.present:
+            continue
+        for word in row:
+            if _column_key_at(columns, word.cx) == key and normalize_amount(word.text) is not None:
+                return False  # 行内含可解析数值：真实数据行
+    text_hits = sum(1 for w in row if w.text.replace(" ", "") in header_texts)
+    if len(row) >= 2 and text_hits / len(row) >= 0.6:
+        return True
+    near_columns = {
+        _column_key_at(columns, w.cx)
+        for w in row
+        if _near_header_center(w, columns)
+    }
+    near_columns.discard(None)
+    near = len([w for w in row if _near_header_center(w, columns)])
+    return len(row) >= 2 and len(near_columns) >= 2 and near / len(row) >= 0.6
+
+
+def _near_header_center(word: Word, columns: dict[str, TableColumn]) -> bool:
+    """词中心是否贴近某列的表头中心（列宽的 40% 以内）。"""
+    key = _column_key_at(columns, word.cx)
+    if key is None:
+        return False
+    header = columns[key].header
+    if header is None:
+        return False
+    width = max(header.width, 1.0)
+    return abs(word.cx - header.cx) <= 0.4 * width
 
 
 def _cell_value(words: list[Word], col: TableColumn) -> str | None:

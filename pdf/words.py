@@ -221,3 +221,25 @@ def with_number_fragments(below: list[Word], words: list[Word]) -> list[Word]:
         if word not in merged:
             merged.append(word)
     return sorted(merged, key=lambda w: (w.y0, w.x0))
+
+
+# 扩展画布的页间距（pt）：保证行聚类不会把相邻两页的内容误并成同一行
+PAGE_GAP = 20.0
+
+
+def merged_page_words(pages_words: list[list[Word]], gap: float = PAGE_GAP) -> list[Word]:
+    """把多页词表拼成一张"扩展画布"：第 i 页的 y 坐标加上页偏移。
+
+    锚点在第 1 页（如"金额"表头）、值在后续页（合计行被排到第 2 页）的
+    字段，只有画布能同时看到两者——Region / Scope / Anchor 在画布上照常
+    工作；页间距保证行聚类不会跨页误并。单页时等价原词表，行为不变。
+    """
+    out: list[Word] = []
+    offset = 0.0
+    for i, words in enumerate(pages_words):
+        if i > 0:
+            offset += gap
+        for w in words:
+            out.append(Word(w.x0, w.y0 + offset, w.x1, w.y1 + offset, w.text))
+        offset += max((w.y1 for w in words), default=0.0)
+    return out

@@ -108,8 +108,17 @@ def missing_values(
 
 
 def audit_document(pdf_path: str, template: dict[str, Any] | None, report: Any) -> TextAudit:
-    """执行 A + B + C：无文本层 / 取值存在性 / 文本一致性（C 仅记录）。"""
-    pages = pages_of(template)
+    """执行 A + B + C：无文本层 / 取值存在性 / 文本一致性（C 仅记录）。
+
+    取值存在性覆盖**全部文档页**：字段跨页兜底后取值可能落在任意页
+    （如合计行被排到第 2 页），只审模板声明页会把合法取值误报为
+    "未在原文找到"。
+    """
+    try:
+        with pymupdf.open(pdf_path) as doc:
+            pages = list(range(doc.page_count)) or [0]
+    except Exception:  # noqa: BLE001 — 打不开的文档由 precheck 负责定性
+        pages = pages_of(template)
     fitz_text = page_text(pdf_path, pages)
     audit = TextAudit(has_text=bool(strip_ws(fitz_text)), char_count=len(strip_ws(fitz_text)))
     if not audit.has_text or template is None or report is None:

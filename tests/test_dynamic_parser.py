@@ -531,7 +531,7 @@ class TestFallbackFlow:
 
 # ------------------------------------------------------- Region 主搜索空间
 
-from pdf.dynamic_parser import DynamicRegionParser, _Word  # noqa: E402
+from pdf.dynamic_parser import DynamicRegionParser, _Word, extract_field_cross_page  # noqa: E402
 
 
 class TestRegionAnchorFallback:
@@ -593,3 +593,118 @@ class TestRegionAnchorFallback:
 
         assert report.fields["amount"].valid, report.fields["amount"].errors
         assert report.fields["amount"].normalized_value == "222.00"
+
+
+# ------------------------------------------------------- 字段跨页提取边界
+
+
+class TestCrossPageFieldExtraction:
+    """跨页字段提取的两个边界：region 标签缺失的单页回退、画布距离预算。"""
+
+    SPEC = {
+        "page": 0,
+        "region": "totals",
+        "anchor": ["金额", "金 额", "金"],
+        "anchor_span": True,
+        "direction": "below",
+        "max_distance": 800,
+        "below_mode": "row",
+        "pick": "last",
+        "type": "decimal",
+        "pattern": r"^[¥￥]?[\d,]+\.\d{2}$",
+    }
+    TEMPLATE = {"regions": {"totals": {"start_anchor": ["合 计", "合计"]}}}
+
+    def test_single_page_region_unresolved_falls_back(self):
+        """单页且 region 标签缺失（页面没有任何"合计"字样）→ 退回未约束提取，
+        不能直接失败（画布兜底不能只在多页时才生效）。"""
+        words = [
+            _Word(60, 251, 96, 260, "金额"),      # 表头锚点
+            _Word(60, 273, 96, 282, "73933.20"),  # 同列明细值（金额列 x 与表头一致）
+        ]
+
+        result = extract_field_cross_page(
+            "amount",
+            self.SPEC,
+            self.TEMPLATE,
+            page_words_fn=lambda p: words,
+            total_pages=1,
+        )
+
+        assert result.valid, result.errors
+        assert result.normalized_value == "73933.20"
+
+    def test_canvas_distance_bonus_reaches_totals_far_on_second_page(self):
+        """锚点在第 1 页表头、合计行在第 2 页中下部：画布上垂直距离 ≈1170pt，
+        超过页内 max_distance=800，画布分支要放宽距离预算才能取到。"""
+        page1 = [
+            _Word(60, 150, 96, 159, "金额"),
+            _Word(60, 200, 96, 209, "111.00"),   # 明细行（region 外，不得取）
+            _Word(60, 800, 200, 809, "页底备注"),  # 撑大第 1 页内容高度
+        ]
+        page2 = [
+            _Word(10, 500, 54, 509, "合 计"),        # 合计标签在名称列
+            _Word(60, 500, 120, 509, "¥75433.20"),  # 金额值在金额列（与表头同 x）
+        ]
+
+        result = extract_field_cross_page(
+            "amount",
+            self.SPEC,
+            self.TEMPLATE,
+            page_words_fn=lambda p: page1 if p == 0 else page2,
+            total_pages=2,
+        )
+
+        assert result.valid, result.errors
+        assert result.normalized_value == "75433.20"
+
+
+# ------------------------------------------------------- 字段跨页兜底
+
+class TestCrossPageFieldFallback:
+    """两页文档：配置页（第 1 页）找不到锚点时，跨页兜底到后续页提取。"""
+
+    def _two_page_pdf(self, tmp_path) -> str:
+        doc = pymupdf.open()
+        first = doc.new_page(width=PAGE_W, height=PAGE_H)
+        first.insert_text((80, 60), "销售合同", fontsize=20, fontname="china-s")
+        second = doc.new_page(width=PAGE_W, height=PAGE_H)
+        second.insert_text((80, 120), "合同编号：", fontsize=12, fontname="china-s")
+        second.insert_text((165, 120), "HT20260901", fontsize=12)
+        second.insert_text((80, 170), "客户名称：", fontsize=12, fontname="china-s")
+        second.insert_text((165, 170), "ABC有限公司", fontsize=12, fontname="china-s")
+        path = tmp_path / "cross_page.pdf"
+        doc.save(path)
+        doc.close()
+        return str(path)
+
+    def test_field_found_on_second_page(self, parser, dynamic_template, tmp_path):
+        pdf = self._two_page_pdf(tmp_path)
+
+        report = parser.parse(pdf, dynamic_template)
+
+        assert report.fields["contract_no"].valid, report.fields["contract_no"].errors
+        assert report.fields["contract_no"].normalized_value == "HT20260901"
+        assert report.fields["customer_name"].valid
+        assert report.fields["customer_name"].normalized_value == "ABC有限公司"
+
+    def test_configured_page_still_wins(self, parser, dynamic_template, normal_pdf):
+        """配置页能取到时不跨页：单页文档行为与之前完全一致。"""
+        report = parser.parse(normal_pdf, dynamic_template)
+
+        assert report.fields["contract_no"].valid
+        assert report.fields["contract_no"].normalized_value == "HT20260901"
+
+    def test_page_out_of_range_still_fails(self, parser, tmp_path):
+        pdf = self._two_page_pdf(tmp_path)
+
+        report = parser.parse(pdf, {
+            "template": "t",
+            "mode": "dynamic",
+            "fields": {
+                "no": {"page": 5, "anchor": "合同编号", "direction": "right"},
+            },
+        })
+
+        assert not report.fields["no"].valid
+        assert any("超出文档范围" in e for e in report.fields["no"].errors)

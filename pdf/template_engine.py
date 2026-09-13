@@ -505,12 +505,16 @@ class TemplateEngine:
 
     @staticmethod
     def _fingerprint(pdf_path: str) -> DocFingerprint:
-        """第一页指纹：文本 + 词元坐标 + 页面尺寸（只取一次，识别全程复用）。"""
+        """指纹取样：文本取前两页（跨页续表时版式特征文本如建筑服务信息块
+        会落在第 2 页），词元坐标与页面尺寸只取第 1 页（位置指纹看首页版式）。"""
         with pymupdf.open(pdf_path) as doc:
             page = doc[0]
             words = tuple(Word(w[0], w[1], w[2], w[3], w[4]) for w in page.get_text("words"))
+            text = page.get_text("text")
+            if doc.page_count > 1:
+                text += "\n" + doc[1].get_text("text")
             return DocFingerprint(
-                text=page.get_text("text"),
+                text=text,
                 words=words,
                 page_width=float(page.rect.width),
                 page_height=float(page.rect.height),

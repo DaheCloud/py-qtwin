@@ -167,14 +167,31 @@ class DetailDialog(QDialog):
         self._btn_fit = self._tool_button("适应宽度", self._fit_pdf_width)
         for w in (self._btn_zoom_out, self._zoom_label, self._btn_zoom_in, self._btn_fit):
             zoom_bar.addWidget(w)
+        # 翻页：连续滚动（MultiPage）+ 页码/上下页按钮，多页发票可逐页核对
+        self._btn_page_prev = self._tool_button(
+            "上一页", lambda: self._pdf_view.pageNavigator().jumpToPreviousPage()
+        )
+        self._page_label = QLabel("—/—")
+        self._page_label.setObjectName("MutedText")
+        self._page_label.setFixedWidth(52)
+        self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._btn_page_next = self._tool_button(
+            "下一页", lambda: self._pdf_view.pageNavigator().jumpToNextPage()
+        )
+        for w in (self._btn_page_prev, self._page_label, self._btn_page_next):
+            zoom_bar.addWidget(w)
         zoom_bar.addStretch(1)
         pdf_l.addLayout(zoom_bar)
 
         self._pdf_view = _ZoomablePdfView()
         self._pdf_view.setObjectName("PdfPreview")
         self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        # 连续多页显示：默认 SinglePage 只显示一页且无翻页控件，多页 PDF 看起来"只有一页"
+        self._pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
         self._pdf_view.on_zoom = lambda f: self._zoom_label.setText(f"{int(f * 100)}%")
         self._pdf_document: QPdfDocument | None = None
+        self._page_count = 0
+        self._page_nav_connected = False
         pdf_l.addWidget(self._pdf_view, 1)
         body.addWidget(pdf_wrap, 12)  # ≈1.2fr
 
@@ -244,6 +261,11 @@ class DetailDialog(QDialog):
         """恢复适应宽度模式，倍率显示还原。"""
         self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self._zoom_label.setText("适应宽度")
+
+    def _update_page_label(self, index: int) -> None:
+        """页码标签（当前页/总页数）：连续滚动或点翻页时刷新。"""
+        total = self._page_count or 0
+        self._page_label.setText(f"{index + 1}/{total}" if total else "—/—")
 
     def load_document(self) -> None:
         """从 DB 拉取字段与验证结果，并加载 PDF 预览（确认操作后重建）。"""
@@ -361,6 +383,19 @@ class DetailDialog(QDialog):
             if document.load(pdf_path) == QPdfDocument.Error.None_:
                 self._pdf_document = document
                 self._pdf_view.setDocument(document)
+                self._page_count = document.pageCount()
+                navigator = self._pdf_view.pageNavigator()
+                if not self._page_nav_connected:
+                    # 确认操作后 load_document 会重建：信号只连一次，避免重复触发
+                    navigator.currentPageChanged.connect(self._update_page_label)
+                    self._page_nav_connected = True
+                self._update_page_label(navigator.currentPage())
+                # 单页文档：翻页按钮无意义，置灰
+                for btn in (self._btn_page_prev, self._btn_page_next):
+                    btn.setEnabled(self._page_count > 1)
+        else:
+            self._page_count = 0
+            self._update_page_label(0)
 
     def _add_hint(self, text: str) -> None:
         label = QLabel(text)

@@ -21,7 +21,7 @@ import pymupdf
 from pdf.normalizers import normalize_amount, normalize_date, normalize_text
 from pdf.pymupdf_parser import ParseReport
 from pdf.region_engine import field_words
-from pdf.table_engine import apply_to_report, extract_table
+from pdf.table_engine import apply_to_report, extract_table_multipage
 from pdf.validators import FieldResult, apply_optional, validate_field
 from pdf.words import (
     ANCHOR_MERGE_GAP_RATIO as _ANCHOR_MERGE_GAP_RATIO,
@@ -32,6 +32,7 @@ from pdf.words import (
     line_overlap as _line_overlap,
     merged_line_words as _merged_line_words,
     merged_neighbor_words as _merged_neighbor_words,
+    merged_page_words,
     page_words as _page_words,
     with_number_fragments as _with_number_fragments,
     x_overlap as _x_overlap,
@@ -497,6 +498,142 @@ def _joined_candidates(sorted_words: list[_Word], limit: int = 3) -> list[_Word]
     return out
 
 
+def field_page_order(page_no: int, total: int) -> list[int]:
+    """字段跨页搜索顺序：配置页优先，其余页按页序兜底（两页发票字段被排到次页）。"""
+    if total <= 0 or page_no >= total:
+        return []
+    return [page_no] + [p for p in range(total) if p != page_no]
+
+
+# 跨页画布的距离预算增量（pt）：约两页高。画布上"锚点在第 1 页、值在第 2 页
+# 中下部"的垂直距离必然 ≥ 一页内容高度，沿用页内 max_distance 会砍掉合法候选。
+_CANVAS_DISTANCE_BONUS = 2000.0
+
+
+def extract_field_cross_page(
+    name: str,
+    spec: dict[str, Any],
+    template: dict[str, Any],
+    *,
+    page_words_fn,
+    total_pages: int,
+    anchor_words_fn=None,
+    parser_name: str = "pymupdf-dynamic",
+) -> FieldResult:
+    """跨页字段提取（PyMuPDF 解析器与 pdfplumber 交叉验证共用同一策略）。
+
+    page_words_fn(p) -> list[Word]：第 p 页候选词表（解析器 = PyMuPDF 词表；
+    交叉验证 = pdfplumber 保守切词词表）。
+    anchor_words_fn(p) -> list[Word]：第 p 页锚点词表（交叉验证用宽松切词
+    合成完整标签；缺省与候选词表相同）。
+
+    策略：
+    1. 配置页优先，失败按页序兜底（字段可能被排到后续页）；
+    2. 带 region 的字段在**某页 region 无法解析**（该页缺少区域锚标签，如
+       合计行不在第 1 页）时跳过该页——此时该页取值不受 region 约束，
+       pick=last 会取到明细行的错值并挡住后续页；
+    3. 全部单页失败后，用"配置页 + 后续页"的扩展画布再试一次——锚点在
+       配置页（如"金额"表头）、值在后续页（合计行被排到第 2 页）的场景
+       只有画布能同时看到两者。
+    """
+    page_no = int(spec.get("page", 0))
+    order = field_page_order(page_no, total_pages)
+    if not order:
+        result = FieldResult(name, "", parser=parser_name)
+        result.fail(f"页码 {page_no} 超出文档范围（共 {total_pages} 页）")
+        return result
+
+    first_result: FieldResult | None = None
+    for p in order:
+        words = page_words_fn(p)
+        anchors = anchor_words_fn(p) if anchor_words_fn else None
+        scoped = field_words(words, template, spec)
+        if spec.get("region") and scoped is words:
+            # 该页解析不出字段所属区域（区域锚标签不在本页）：本页取值
+            # 不受 region 约束、不可信，跳过（取值交给后续页/画布兜底）
+            continue
+        if scoped is words:
+            result = extract_anchor_field(
+                name, words, spec,
+                parser_name=parser_name,
+                anchor_words=anchors if anchor_words_fn else None,
+            )
+        else:
+            # Region 是主要搜索空间：锚点与候选都先限制在 Region 内；
+            # Region 内找不到锚点/取不到值时，锚点回退全页查找（交叉验证用
+            # 宽松词表），候选仍限制在 Region 内
+            result = extract_anchor_field(name, scoped, spec, parser_name=parser_name)
+            if not (result.valid and result.normalized_value):
+                result = extract_anchor_field(
+                    name,
+                    scoped,
+                    spec,
+                    parser_name=parser_name,
+                    anchor_words=anchors if anchor_words_fn is not None else words,
+                )
+        if p == page_no:
+            first_result = result
+        if result.valid and result.normalized_value:
+            return result
+
+    # 全部单页失败：扩展画布（配置页 + 后续页）兜底。
+    # 单页文档也走这一步：画布等于该页词表，等价"region 不可解析时退回未约束
+    # 提取"（旧行为），否则 region 标签缺失的版式会让字段直接失败。
+    canvas = merged_page_words([page_words_fn(p) for p in order])
+    canvas_anchors = (
+        merged_page_words([anchor_words_fn(p) for p in order]) if anchor_words_fn else None
+    )
+    # 多页画布才放宽距离预算：单页兜底（region 标签缺失退回未约束提取）必须
+    # 保留原来的 max_distance 语义，否则"锚点下方过远"的字段会取到远处错值
+    canvas_spec = (
+        {**spec, "max_distance": float(spec.get("max_distance", 50)) + _CANVAS_DISTANCE_BONUS}
+        if len(order) > 1
+        else spec
+    )
+    scoped = field_words(canvas, template, canvas_spec)
+    if scoped is canvas:
+        canvas_result = extract_anchor_field(
+            name,
+            canvas,
+            canvas_spec,
+            parser_name=parser_name,
+            anchor_words=canvas_anchors if anchor_words_fn is not None else None,
+        )
+    else:
+        canvas_result = extract_anchor_field(
+            name, scoped, canvas_spec, parser_name=parser_name
+        )
+        if not (canvas_result.valid and canvas_result.normalized_value):
+            canvas_result = extract_anchor_field(
+                name,
+                scoped,
+                canvas_spec,
+                parser_name=parser_name,
+                anchor_words=(canvas_anchors if anchor_words_fn is not None else canvas),
+            )
+    if canvas_result.valid and canvas_result.normalized_value:
+        return canvas_result
+
+    if first_result is not None:
+        return first_result
+    result = FieldResult(name, "", parser=parser_name)
+    result.fail(f"各页均未提取到 {name}（含跨页画布兜底）")
+    return result
+
+
+def _extract_field_across_pages(
+    name: str,
+    spec: dict[str, Any],
+    template: dict[str, Any],
+    words_of,
+    total_pages: int,
+) -> FieldResult:
+    """PyMuPDF 解析器的跨页字段提取（词表与锚点词表同源）。"""
+    return extract_field_cross_page(
+        name, spec, template, page_words_fn=words_of, total_pages=total_pages
+    )
+
+
 class DynamicRegionParser:
     """按模板 JSON 的 anchor/direction 规则提取字段。
 
@@ -553,6 +690,7 @@ class DynamicRegionParser:
 
         report = ParseReport(template_id=template.get("template", "unknown"), mode=mode)
         with pymupdf.open(pdf_path) as doc:
+            total_pages = len(doc)
             words_cache: dict[int, list[_Word]] = {}
 
             def words_of(page_no: int) -> list[_Word]:
@@ -561,35 +699,23 @@ class DynamicRegionParser:
                     words_cache[page_no] = _page_words(doc[page_no])
                 return words_cache[page_no]
 
-            # ① 表格重建（Table First）：先把整张明细表重建出来
+            # ① 表格重建（Table First）：先把整张明细表重建出来。
+            # 首页表格贴到页底（未命中 stop_anchor）时，向后续页拼接明细行。
             table_config = template.get("table")
             if table_config:
                 table_page = int(table_config.get("page", 0))
-                if table_page < len(doc):
-                    report.table = extract_table(words_of(table_page), table_config, page=table_page)
+                if table_page < total_pages:
+                    report.table = extract_table_multipage(
+                        (words_of(p) for p in range(table_page, total_pages)), table_config
+                    )
                     report.items = list(report.table.items)
 
-            # ② 普通字段：锚点 + 相对方向（Region → Scope → Anchor → Value）
+            # ② 普通字段：锚点 + 相对方向（Region → Scope → Anchor → Value），
+            # 配置页取不到时跨页兜底（字段可能被排到第二页）
             for name, spec in template.get("fields", {}).items():
-                page_no = int(spec.get("page", 0))
-                if page_no >= len(doc):
-                    result = FieldResult(name, "", parser="pymupdf-dynamic")
-                    result.fail(f"页码 {page_no} 超出文档范围（共 {len(doc)} 页）")
-                    report.fields[name] = result
-                    continue
-
-                words = words_of(page_no)
-                scoped = field_words(words, template, spec)
-                if scoped is words:
-                    report.fields[name] = extract_anchor_field(name, words, spec)
-                else:
-                    # Region 是主要搜索空间：锚点与候选都先限制在 Region 内；
-                    # Region 内找不到锚点/取不到值时，锚点回退全页查找，候选仍限制
-                    # 在 Region 内（Region 是主搜索空间，全页只是锚点兜底）
-                    result = extract_anchor_field(name, scoped, spec)
-                    if not (result.valid and result.normalized_value):
-                        result = extract_anchor_field(name, scoped, spec, anchor_words=words)
-                    report.fields[name] = result
+                report.fields[name] = _extract_field_across_pages(
+                    name, spec, template, words_of, total_pages
+                )
 
             # ③ 表格结果回填明细字段（成功时覆盖锚点取值）
             if report.table is not None:

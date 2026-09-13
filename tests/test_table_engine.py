@@ -21,7 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pdf.dynamic_parser import DynamicRegionParser, _Word
-from pdf.table_engine import extract_table
+from pdf.table_engine import extract_table, extract_table_multipage
 from pdf.template_engine import TemplateEngine
 from pdf.validators import FieldResult, validate_business, validate_structure
 
@@ -708,3 +708,169 @@ class TestItemsValidation:
         assert next(c for c in checks if c.rule == "sum_amount").skipped
         item = next(c for c in checks if c.rule == "item_amount")
         assert item.passed and not item.skipped  # 仅第 1 行参与校验
+
+
+# ----------------------------------------------------------- 明细表跨页拼接
+
+
+class TestMultipageTable:
+    """两页明细表：首页贴到页底（未命中合计锚点）→ 后续页拼行接续。"""
+
+    def test_single_page_complete_table_not_extended(self):
+        """首页命中合计锚点（表格闭合）→ 不向后页拼接。"""
+        page1 = [*_header(), *_data_row(273), *_totals_row(360)]
+        page2 = [*_data_row(60, name="*建筑服务*安装款"), *_totals_row(120)]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert result.ok, result.issues
+        assert [it["row_index"] for it in result.items] == [1]
+
+    def test_single_page_equals_plain_extract(self):
+        """单页文档经跨页入口与单页入口结果完全一致：跨页逻辑不影响单页。"""
+        page = [*_header(), *_data_row(273), *_totals_row(360)]
+
+        plain = extract_table(page, _table_config())
+        multipage = extract_table_multipage(iter([page]), _table_config())
+
+        assert multipage.items == plain.items
+        assert multipage.stop_y == plain.stop_y
+        assert multipage.header_y == plain.header_y
+        assert multipage.issues == plain.issues
+
+    def test_single_page_open_table_not_extended_without_more_pages(self):
+        """单页且表格贴页底（无合计行）：iterator 已耗尽，不再扩展也不报错。"""
+        page = [*_header(), *_data_row(273)]
+
+        result = extract_table_multipage(iter([page]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1]
+        assert result.stop_y is None
+
+    def test_rows_continue_on_next_page(self):
+        """首页表格贴到页底（无合计行）→ 第 2 页行拼接、行号接续。"""
+        page1 = [
+            *_header(),
+            *_data_row(273),
+            *_data_row(300, name="*建筑服务*材料款", unit_price="1200.00", amount="1200.00", tax="36.00"),
+        ]
+        page2 = [
+            *_data_row(60, name="*建筑服务*安装款", unit_price="300.00", amount="300.00", tax="9.00"),
+            *_totals_row(120),
+        ]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert result.ok, result.issues
+        assert [it["row_index"] for it in result.items] == [1, 2, 3]
+        assert result.items[2]["amount"] == "300.00"
+        assert result.items[2]["tax"] == "9.00"
+        assert result.items[1]["amount"] == "1200.00"
+
+    def test_continuation_stops_at_totals_on_second_page(self):
+        """第 2 页命中合计锚点 → 合计行之后的文本不进入明细。"""
+        page1 = [*_header(), *_data_row(273)]
+        page2 = [
+            *_data_row(60, name="*建筑服务*安装款", unit_price="300.00", amount="300.00", tax="9.00"),
+            *_totals_row(120),
+            _Word(60, 160, 150, 169, "备注说明文本"),
+        ]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1, 2]
+        assert all("备注" not in (it.get("name") or "") for it in result.items)
+
+    def test_continuation_stops_when_page_has_no_data_rows(self):
+        """后续页拼不出明细行（表格已结束）→ 停止扩展。"""
+        page1 = [*_header(), *_data_row(273)]
+        page2 = [_Word(60, 60, 150, 69, "尾页只有说明文字")]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1]
+
+    def test_empty_page_iterator(self):
+        iterator = iter([])
+
+        result = extract_table_multipage(iterator, _table_config())
+
+        assert not result.ok
+        assert "table_not_configured" in result.issues
+
+    def test_totals_only_on_second_page_closes_table(self):
+        """明细全在第 1 页、合计行在第 2 页 → 表格闭合（stop_y 回写、明细不丢）。"""
+        page1 = [*_header(), *_data_row(273), *_data_row(300, name="*建筑服务*材料款")]
+        page2 = [*_totals_row(140)]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1, 2]
+        assert result.stop_y == pytest.approx(140)
+
+    def test_continuation_ignores_repeated_header_and_page_footer(self):
+        """后续页的噪声：页眉 + 重复表头行 + 页脚都不进明细。
+
+        不过滤时：重复表头行会因"短文本即数据"变成垃圾 item（name="项目名称"），
+        页眉文字会被 prefix 并入下一条明细的名称。
+        """
+        page1 = [*_header(), *_data_row(273), *_data_row(300, name="*建筑服务*材料款")]
+        page2 = [
+            _Word(60, 40, 150, 49, "销货清单（续）"),  # 页眉（在重复表头上方）
+            *_header(60),  # 重复表头行
+            *_data_row(82, name="*建筑服务*安装款", unit_price="300.00", amount="300.00", tax="9.00"),
+            *_totals_row(140),
+            _Word(290, 800, 310, 809, "1/2"),  # 页脚页码
+        ]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1, 2, 3]
+        assert [it["name"] for it in result.items] == [
+            "*建筑服务*劳务工程款",
+            "*建筑服务*材料款",
+            "*建筑服务*安装款",
+        ]
+        assert result.stop_y == pytest.approx(140)  # 合计行在本页：表格闭合
+        assert all("销货清单" not in (it["name"] or "") for it in result.items)
+        assert all(it["quantity"] == "1" for it in result.items)
+
+    def test_continuation_split_word_header_not_turned_into_item(self):
+        """第 2 页表头被字间距拆词（"数"+"量"）：文本不匹配也能靠位置判据识别。"""
+        split_header = [
+            _Word(60, 60, 96, 69, "项目名称"),
+            _Word(230, 60, 239, 69, "数"),
+            _Word(248, 60, 257, 69, "量"),
+            _Word(290, 60, 299, 69, "单"),
+            _Word(308, 60, 317, 69, "价"),
+            _Word(350, 60, 359, 69, "金"),
+            _Word(368, 60, 377, 69, "额"),
+            _Word(420, 60, 474, 69, "税率/征收率"),
+            _Word(500, 60, 509, 69, "税"),
+            _Word(518, 60, 527, 69, "额"),
+        ]
+        page1 = [*_header(), *_data_row(273)]
+        page2 = [
+            *split_header,
+            *_data_row(82, name="*建筑服务*安装款", unit_price="300.00", amount="300.00", tax="9.00"),
+            *_totals_row(140),
+        ]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [it["row_index"] for it in result.items] == [1, 2]
+        assert result.items[1]["name"] == "*建筑服务*安装款"
+        assert result.items[1]["quantity"] == "1"
+
+    def test_single_page_footer_not_turned_into_item(self):
+        """单页表格贴到页底（无合计行）时，页脚页码不进明细。"""
+        words = [
+            *_header(),
+            *_data_row(273),
+            _Word(290, 800, 310, 809, "1/2"),  # 页脚：落在数量/单价列位置
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert len(result.items) == 1
+        assert result.items[0]["name"] == "*建筑服务*劳务工程款"

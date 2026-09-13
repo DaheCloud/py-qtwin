@@ -62,18 +62,25 @@ def _strip_ws(text: str | None) -> str:
 
 
 def precheck_document(pdf_path: str | Path) -> PrecheckResult:
-    """打开 PDF 做快速体检（不抛异常：损坏文件返回 ok=False + 错误信息）。"""
+    """打开 PDF 做快速体检（不抛异常：损坏文件返回 ok=False + 错误信息）。
+
+    文本层按"**任意页**有文本"判定：多页文档中首页可能是扫描封面/图片页，
+    只查首页会误判为扫描件并挂起等 OCR。字符数达标即提前停止扫描（页数多
+    也不拖慢）。页面尺寸仍取第 1 页（模板指纹用）。
+    """
     try:
         with pymupdf.open(str(pdf_path)) as doc:
             page_count = doc.page_count
             first = doc[0] if page_count else None
             width = height = None
-            text = ""
             if first is not None:
                 rect = first.rect
                 width, height = float(rect.width), float(rect.height)
-                text = first.get_text("text")
-            chars = len(_strip_ws(text))
+            chars = 0
+            for page in doc:
+                chars += len(_strip_ws(page.get_text("text")))
+                if chars >= MIN_TEXT_CHARS:
+                    break
             return PrecheckResult(
                 ok=True,
                 page_count=page_count,
