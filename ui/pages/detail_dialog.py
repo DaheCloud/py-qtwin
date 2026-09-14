@@ -265,7 +265,7 @@ class DetailDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.resize(1040, 680)
+        self.resize(1200, 680)
         self.setObjectName("ModalContainer")
         # 确保弹窗背景使用 QSS 主题色（否则系统深色模式下会回退到深色调色板，
         # 与浅色主题的文字色叠加导致"深底深字"看不清）
@@ -331,7 +331,7 @@ class DetailDialog(QDialog):
         self._render_signals = _PdfRenderSignals(self)
         self._render_signals.finished.connect(self._on_pdf_rendered)
         pdf_l.addWidget(self._pdf_view, 1)
-        body.addWidget(pdf_wrap, 2)
+        body.addWidget(pdf_wrap, 6)  # 预览 : 字段 = 6 : 4
 
         # ---- 右：字段校验
         right = QWidget()
@@ -370,7 +370,7 @@ class DetailDialog(QDialog):
         self._fields_l.setSpacing(6)
         self._fields_area.setWidget(self._fields_host)
         right_l.addWidget(self._fields_area, 1)
-        body.addWidget(right, 1)
+        body.addWidget(right, 4)  # 预览 : 字段 = 6 : 4
 
         # ---- 底部：整体人工确认（仅待人工确认状态显示）
         footer = QHBoxLayout()
