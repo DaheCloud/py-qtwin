@@ -348,10 +348,11 @@ class DetailDialog(QDialog):
         status_row = QHBoxLayout()
         status_label = QLabel("识别状态：")
         status_label.setFont(ui_font(10))
+        status_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         status_row.addWidget(status_label)
-        self._status_badge_host = QHBoxLayout()
-        status_row.addLayout(self._status_badge_host)
-        status_row.addStretch(1)
+        self._status_badge_host = QVBoxLayout()
+        self._status_badge_host.setSpacing(4)
+        status_row.addLayout(self._status_badge_host, 1)
         right_l.addLayout(status_row)
 
         self._fields_area = QScrollArea()
@@ -535,6 +536,7 @@ class DetailDialog(QDialog):
             if document_score is not None:
                 detail_parts.append(f"文档质量分 {float(document_score):.2f}")
             dimension = QLabel(" · ".join(detail_parts))
+            dimension.setWordWrap(True)
             dimension.setStyleSheet(f"color: {token('TEXT_MUTED')}; font-size: 12px;")
             self._status_badge_host.addWidget(dimension)
 
@@ -555,6 +557,7 @@ class DetailDialog(QDialog):
             confidence.setStyleSheet(
                 f"color: {token('TEXT_MUTED')}; font-size: 12px;"
             )
+            confidence.setWordWrap(True)
             self._status_badge_host.addWidget(confidence)
 
         if error_reason:
