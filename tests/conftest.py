@@ -7,12 +7,16 @@ contract_v1 仅作为测试专用演示模板（内联定义，不依赖生产 t
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Qt 用例（筛选页交互等）统一走离屏渲染：必须在任何 Qt 导入/建 QApplication 之前设置
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pdf.template_engine import TemplateEngine  # noqa: E402
 

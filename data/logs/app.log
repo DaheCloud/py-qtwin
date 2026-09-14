@@ -1,0 +1,9 @@
+2026-09-14 09:54:31,335 INFO [startup] 数据库结构已对齐：结构版本 v0 → v2；新增表 extracted_items；补齐列 5 个（documents.template_version、documents.error_reason、documents.identify_confidence、documents.parse_confidence、documents.overall_confidence）；原库已备份为 legacy.db.bak-v0（C:\Users\Dahe2\AppData\Local\Temp\tmpsb5d5pqv\legacy.db）
+2026-09-14 09:54:32,155 INFO [startup] 数据库结构已对齐：库文件损坏已重建；结构版本 v0 → v2；新增表 documents、templates、audit_logs、extracted_fields、extracted_items、verification_results；损坏文件保留为 corrupt.db.corrupt-20260914-095432（C:\Users\Dahe2\AppData\Local\Temp\tmpsb5d5pqv\corrupt.db）
+2026-09-14 09:54:32,526 INFO [startup] 数据库结构已对齐：结构版本 v0 → v2；新增表 documents、templates、audit_logs、extracted_fields、extracted_items、verification_results（C:\Users\Dahe2\AppData\Local\Temp\tmpsb5d5pqv\fresh.db）
+2026-09-14 09:55:03,691 INFO [startup] 数据库结构已对齐：结构版本 v0 → v2；新增表 extracted_items；补齐列 5 个（documents.template_version、documents.error_reason、documents.identify_confidence、documents.parse_confidence、documents.overall_confidence）；原库已备份为 legacy.db.bak-v0（C:\Users\Dahe2\AppData\Local\Temp\tmpscg9ymoc\legacy.db）
+2026-09-14 09:55:04,464 INFO [startup] 数据库结构已对齐：库文件损坏已重建；新增表 documents、templates、audit_logs、extracted_fields、extracted_items、verification_results；损坏文件保留为 corrupt.db.corrupt-20260914-095504（C:\Users\Dahe2\AppData\Local\Temp\tmpscg9ymoc\corrupt.db）
+2026-09-14 09:55:04,874 INFO [startup] 数据库结构已对齐：新建数据库（6 张表）（C:\Users\Dahe2\AppData\Local\Temp\tmpscg9ymoc\fresh.db）
+2026-09-14 09:55:23,812 INFO [startup] 数据库结构已对齐：结构版本 v0 → v2；新增表 extracted_items；补齐列 5 个（documents.template_version、documents.error_reason、documents.identify_confidence、documents.parse_confidence、documents.overall_confidence）；原库已备份为 _tmp_cli.db.bak-v0（_tmp_cli.db）
+2026-09-14 10:49:31,919 INFO [startup] 数据库结构已对齐：结构版本 v0 → v2；原库已备份为 app.db.bak-v0（F:\workspace\py-project\py-qtwin\data\app.db）
+2026-09-14 16:23:44,636 INFO [startup] 数据库结构已对齐：新建数据库（6 张表）（data/_v2_smoke.db）

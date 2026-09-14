@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal, QSize
@@ -90,6 +91,21 @@ def _status_text(status: str) -> str:
     return _STATUS_TEXT.get(status, status)
 
 
+# 日期文本 → 年月：兼容 "2026-09-09"、"2026年9月9日"、"2026/09/09"
+_MONTH_RE = re.compile(r"(\d{4})[-/年.](\d{1,2})")
+
+
+def year_month(value: str | None) -> str:
+    """日期文本 → 年月 "YYYY-MM"；不可解析返回空串。"""
+    match = _MONTH_RE.search(str(value or ""))
+    return f"{match.group(1)}-{int(match.group(2)):02d}" if match else ""
+
+
+def record_month(fields: dict[str, str | None]) -> str:
+    """记录的开票年月：优先 invoice_date，兼容旧合同数据的 sign_date。"""
+    return year_month(fields.get("invoice_date") or fields.get("sign_date"))
+
+
 def _check_icon(checked: bool) -> QIcon:
     """自绘勾选图标：未选灰框白底；选中蓝底白勾（完全自绘，不受系统控件渲染影响）。
 
@@ -128,6 +144,8 @@ class FilterPage(QWidget):
         super().__init__(parent)
         self._db_path = db_path
         self._toast = Toast(self)
+        # 批量勾选（全选/取消全选）期间挂起"已选择 N 项"刷新，避免逐行触发 O(n²)
+        self._suspend_select_count = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -150,6 +168,13 @@ class FilterPage(QWidget):
         self._status_filter.addItem("可疑/待校验", "review")
         bar_l.addWidget(self._status_filter)
 
+        # 开票年月过滤：选项在 reload 时按库内数据动态统计（只到年月）
+        self._month_filter = QComboBox()
+        self._month_filter.addItem("全部月份", "")
+        self._month_filter.setMinimumWidth(120)
+        self._month_filter.currentIndexChanged.connect(self.reload)
+        bar_l.addWidget(self._month_filter)
+
         query_btn = QPushButton("查询")
         query_btn.setProperty("cssClass", "btn-primary")
         query_btn.clicked.connect(self.reload)
@@ -169,6 +194,14 @@ class FilterPage(QWidget):
         export_btn.setProperty("cssClass", "btn-success")
         export_btn.clicked.connect(self._export_selected)
         head.addWidget(export_btn)
+
+        # 一键确认：勾选"可疑/待校验"的记录后批量标记为「准确」
+        self._confirm_btn = QPushButton("✓ 一键确认选中项")
+        self._confirm_btn.setProperty("cssClass", "btn-success")
+        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._confirm_btn.setToolTip("把勾选的「可疑/待校验」记录批量标记为「准确」（记录审计日志）")
+        self._confirm_btn.clicked.connect(self._confirm_selected)
+        head.addWidget(self._confirm_btn)
 
         delete_btn = QPushButton("🗑 批量删除选中项")
         delete_btn.setProperty("cssClass", "btn-danger")
@@ -290,21 +323,32 @@ class FilterPage(QWidget):
 
         with factory() as session:
             stmt = select(Document).order_by(Document.imported_at.desc())
-            docs = list(session.scalars(stmt))
-            rows = []
-            for doc in docs:
-                fields = {f.field_name: f.normalized_value for f in doc.fields}
-                if keywords:
-                    hay = doc.file_name.lower() + "\n" + "\n".join(
-                        str(v).lower() for v in fields.values() if v
-                    )
-                    if not all(k in hay for k in keywords):
-                        continue
-                if status == "review" and doc.status not in ("manual_review", "warning"):
+            records = [
+                (doc.id, doc.file_name, {f.field_name: f.normalized_value for f in doc.fields}, doc.status)
+                for doc in session.scalars(stmt)
+            ]
+
+        # 先统计库内有哪些开票年月（下拉选项），再按当前选择过滤
+        self._sync_month_options(
+            sorted({record_month(fields) for _, _, fields, _ in records} - {""}, reverse=True)
+        )
+        month = self._month_filter.currentData() or ""
+
+        rows = []
+        for doc_id, file_name, fields, doc_status in records:
+            if keywords:
+                hay = file_name.lower() + "\n" + "\n".join(
+                    str(v).lower() for v in fields.values() if v
+                )
+                if not all(k in hay for k in keywords):
                     continue
-                if status and status != "review" and doc.status != status:
-                    continue
-                rows.append((doc.id, doc.file_name, fields))
+            if status == "review" and doc_status not in ("manual_review", "warning"):
+                continue
+            if status and status != "review" and doc_status != status:
+                continue
+            if month and record_month(fields) != month:
+                continue
+            rows.append((doc_id, file_name, fields))
 
         self._table.setRowCount(0)
         self._action_table.setRowCount(0)
@@ -315,6 +359,23 @@ class FilterPage(QWidget):
         self._update_select_count()
         if not rows:
             self._toast.show_message("没有符合条件的数据")
+
+    def _sync_month_options(self, months: list[str]) -> None:
+        """刷新"开票年月"下拉选项：保留当前选择，选项已消失时回到"全部月份"。
+
+        blockSignals 避免 clear/addItem/setCurrentIndex 触发 currentIndexChanged
+        递归回 reload（统计与过滤必须在同一次刷新里完成）。
+        """
+        current = self._month_filter.currentData() or ""
+        self._month_filter.blockSignals(True)
+        self._month_filter.clear()
+        self._month_filter.addItem("全部月份", "")
+        for month in months:
+            year, _, mon = month.partition("-")
+            self._month_filter.addItem(f"{year}年{mon}月", month)
+        index = self._month_filter.findData(current)
+        self._month_filter.setCurrentIndex(index if index >= 0 else 0)
+        self._month_filter.blockSignals(False)
 
     def _append_row(self, doc_id: int, file_name: str, fields: dict[str, str | None]) -> None:
         r = self._table.rowCount()
@@ -329,7 +390,7 @@ class FilterPage(QWidget):
         check_btn.setIcon(_check_icon(False))
         check_btn.setIconSize(QSize(16, 16))
         check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        check_btn.toggled.connect(lambda on, b=check_btn: b.setIcon(_check_icon(on)))
+        check_btn.toggled.connect(lambda on, b=check_btn: self._on_row_checked(on, b))
         self._table.setCellWidget(r, COL_CHECK, check_btn)
 
         self._table.setItem(r, COL_NAME, QTableWidgetItem(file_name))
@@ -400,12 +461,27 @@ class FilterPage(QWidget):
         x = self._table.columnViewportPosition(COL_CHECK) + self._table.columnWidth(COL_CHECK) // 2 - 10
         self._select_all_btn.move(max(2, x), max(2, (header.height() - 20) // 2))
 
+    def _on_row_checked(self, checked: bool, button: QPushButton) -> None:
+        """行勾选：换图标并实时刷新"已选择 N 项"。
+
+        批量勾选期间挂起刷新（否则每行都全表统计一次，大数据量下是 O(n²)），
+        由 _select_all_rows 结束时统一刷新一次。
+        """
+        button.setIcon(_check_icon(checked))
+        if not self._suspend_select_count:
+            self._update_select_count()
+
     def _select_all_rows(self, checked: bool) -> None:
         """全选 / 取消全选。"""
-        for r in range(self._table.rowCount()):
-            btn = self._table.cellWidget(r, COL_CHECK)
-            if isinstance(btn, QPushButton):
-                btn.setChecked(checked)
+        self._suspend_select_count = True
+        try:
+            for r in range(self._table.rowCount()):
+                btn = self._table.cellWidget(r, COL_CHECK)
+                if isinstance(btn, QPushButton):
+                    btn.setChecked(checked)
+        finally:
+            self._suspend_select_count = False
+        self._update_select_count()
 
     # ------------------------------------------------------------- 列显示控制
 
@@ -545,8 +621,14 @@ class FilterPage(QWidget):
         return ids
 
     def _update_select_count(self) -> None:
+        """刷新"已选择 N 项"（勾选/取消勾选/全选/刷新数据后都会走到这里）。
+
+        列表为空时不显示：空列表上挂一条"已选择 0 项"没有意义（此时
+        过滤条件提示已经由 Toast 给出）。
+        """
         n = len(self._selected_doc_ids())
         self._select_count_label.setText(f"已选择 <b style='color:#2563eb'>{n}</b> 项")
+        self._select_count_label.setVisible(self._table.rowCount() > 0)
 
     def _export_selected(self) -> None:
         ids = set(self._selected_doc_ids())
@@ -654,6 +736,54 @@ class FilterPage(QWidget):
                 QMessageBox.warning(self, "导出失败", f"无法写入文件（可能正被 Excel 打开）：\n{e}")
                 return
         self._toast.show_message(f"已导出 {len(ok_ids)} 条「准确」数据")
+
+    def _confirm_selected(self) -> None:
+        """一键确认：把勾选的「可疑/待校验」记录批量标记为「准确」。
+
+        只处理可疑状态：已经准确的不必再确认，解析失败的关键字段可能缺失，
+        不适合一键放行（需在详情弹窗逐项核对）——跳过的条目会在提示里说明。
+        落库语义与详情弹窗的「确认无误」一致（见 services/review_service.py）。
+        """
+        ids = self._selected_doc_ids()
+        if not ids:
+            self._toast.show_message("请先勾选要确认的行")
+            return
+
+        from database.db import get_engine, make_session_factory
+        from services.review_service import confirm_documents
+
+        engine = get_engine(self._db_path)
+        factory = make_session_factory(engine)
+
+        # 先试算：确认框里明确写出"将确认几条、跳过几条"
+        with factory() as session:
+            preview = confirm_documents(session, ids, source="filter_page", dry_run=True)
+        if not preview.confirmed:
+            self._toast.show_message("勾选的数据中没有「可疑/待校验」记录，无需确认")
+            return
+
+        message = (
+            f"确认选中的 {preview.confirmed_count} 条「可疑/待校验」数据无误？\n"
+            "确认后状态变为「准确」，并记录审计日志。"
+        )
+        if preview.skipped:
+            message += f"\n（另有 {len(preview.skipped)} 条非可疑状态，将跳过）"
+        if preview.missing:
+            message += f"\n（另有 {len(preview.missing)} 条记录已不存在，将跳过）"
+        answer = QMessageBox.question(self, "确认无误", message)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        with factory() as session:
+            report = confirm_documents(session, preview.confirmed, source="filter_page")
+            session.commit()
+
+        self._select_all_btn.setChecked(False)  # 重置表头全选，避免刷新后勾选态残留
+        self.reload()
+        self._toast.show_message(
+            f"已确认 {report.confirmed_count} 条，状态更新为「准确」"
+            + (f"（顺带复核 {report.confirmed_fields} 个字段）" if report.confirmed_fields else "")
+        )
 
     def _view_row(self, row: int) -> None:
         doc_id = self._table.item(row, COL_NAME).data(Qt.ItemDataRole.UserRole)

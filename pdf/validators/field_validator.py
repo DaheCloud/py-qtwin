@@ -22,7 +22,13 @@ SEVERITY_CRITICAL = "critical"
 
 @dataclass
 class FieldResult:
-    """单个字段的解析结果。"""
+    """单个字段的解析结果。
+
+    V2 增加**取值溯源**字段（方案 §5.2 / §12.1）：解析器在取值的同时记录
+    "从哪一页、哪个矩形、有没有命中锚点、用了哪个区域/兜底路径"，
+    evidence 层据此生成锚点/几何/区域证据——不记录就无从解释置信度。
+    这些字段全部有默认值，老调用方（含测试）不受影响。
+    """
 
     field_name: str
     raw_value: str
@@ -30,6 +36,16 @@ class FieldResult:
     valid: bool = True
     parser: str = "pymupdf"
     errors: list[str] = field(default_factory=list)
+    # ---- V2 溯源（证据收集用）----
+    page: int | None = None
+    rect: tuple[float, float, float, float] | None = None
+    anchor_hit: bool | None = None
+    region: str | None = None
+    region_used: bool = False
+    region_fallback: str | None = None
+    fallback_used: bool = False
+    candidate_count: int = 0
+    strategy: str = "primary"
 
     def fail(self, message: str) -> None:
         self.valid = False

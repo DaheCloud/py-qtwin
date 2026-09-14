@@ -77,6 +77,18 @@ _EPS = 0.01
 _BAND_MERGE_SPAN = 4
 _BAND_MERGE_GAP_RATIO = 2.0
 
+# V2 列边界数据修正（方案 §8.2）：只允许小幅修正，避免数据反向污染表头结构
+_BOUNDARY_MAX_SHIFT = 15.0
+_BOUNDARY_SAMPLE_ROWS = 5
+
+# 表格证据维度权重（方案 §8.3）：必需列 > 行一致性 ≒ 列对齐 > 表头覆盖率
+_TABLE_EVIDENCE_WEIGHTS: dict[str, float] = {
+    "required_columns": 0.35,
+    "row_consistency": 0.25,
+    "column_alignment": 0.25,
+    "header": 0.15,
+}
+
 
 @dataclass
 class TableColumn:
@@ -119,6 +131,9 @@ class TableResult:
     stop_y: float | None = None
     physical_rows: int = 0
     issues: list[str] = field(default_factory=list)
+    # V2（方案 §8.2）：列边界来源（header / data_refined）与对齐质量分
+    boundary_source: str = "header"
+    alignment_score: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -139,6 +154,10 @@ class TableResult:
             "column_count": sum(1 for c in self.columns.values() if c.present),
             "missing_columns": self.missing_columns,
             "issues": list(self.issues),
+            "boundary_source": self.boundary_source,
+            "alignment_score": (
+                round(self.alignment_score, 4) if self.alignment_score is not None else None
+            ),
             "columns": [col.as_dict() for col in self.columns.values()],
             "items": [dict(item) for item in self.items],
         }
@@ -170,6 +189,12 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
     ]
     rows = group_rows(region, tolerance=_row_tolerance(words, config))
     result.physical_rows = len(rows)
+
+    # V2（方案 §8.2）：用前几行真实数据微调列边界（表头中心点只是初值）
+    refined, alignment = _refine_bounds_from_data(columns, rows, config)
+    if refined:
+        result.boundary_source = "data_refined"
+    result.alignment_score = alignment
 
     items, trailing = _build_items(
         rows, columns, suffix_continuation=bool(config.get("suffix_continuation", True))
@@ -396,6 +421,150 @@ def _assign_bounds(columns: dict[str, TableColumn], config: dict[str, Any]) -> N
             col.right = last.header.x1 + margin  # type: ignore[union-attr]
         else:
             col.right = (cx + present[i + 1].header.cx) / 2  # type: ignore[union-attr]
+
+
+def _refine_bounds_from_data(
+    columns: dict[str, TableColumn],
+    rows: list[list[Word]],
+    config: dict[str, Any],
+) -> tuple[bool, float | None]:
+    """用前几行真实数据微调列边界（方案 §8.2）。
+
+    表头中心点只反映"表头文字"的位置：短表头 + 宽数据列、右对齐数字、
+    金额列偏窄时边界会系统性偏移。这里取前 N 行物理行，按"相邻两列数据簇
+    之间的空隙"重新取中，并且**只允许小幅修正**
+    （默认 ±15pt，模板可配 ``table.boundary_max_shift``），避免数据反向污染
+    表头结构。
+
+    返回 (是否修正过, 对齐质量分 0~1)。对齐分 = 1 - 数据中心与表头中心的
+    平均偏移 / 最大允许偏移，供 table evidence 使用。
+    """
+    present = sorted(
+        (col for col in columns.values() if col.present),
+        key=lambda col: col.header.cx,  # type: ignore[union-attr]
+    )
+    if not present or not rows:
+        return False, None
+
+    max_shift = max(0.0, float(config.get("boundary_max_shift", _BOUNDARY_MAX_SHIFT)))
+    words = [w for row in rows[:_BOUNDARY_SAMPLE_ROWS] for w in row]
+    if not words:
+        return False, None
+
+    centers: dict[str, list[float]] = {col.key: [] for col in present}
+    for word in words:
+        key = _column_key_at(columns, word.cx)
+        if key in centers:
+            centers[key].append(word.cx)
+
+    shifts: list[float] = []
+    for col in present:
+        values = centers.get(col.key) or []
+        if not values:
+            continue
+        values.sort()
+        data_center = values[len(values) // 2]
+        shifts.append(abs(data_center - col.header.cx))  # type: ignore[union-attr]
+    alignment = None
+    if shifts:
+        avg_shift = sum(shifts) / len(shifts)
+        alignment = max(0.0, min(1.0, 1.0 - avg_shift / max(max_shift, 1.0)))
+
+    new_bounds: dict[str, tuple[float, float]] = {}
+    prev_right: float | None = None
+    for i, col in enumerate(present):
+        left = col.left if i == 0 else _shift_boundary(col.left, words, max_shift)
+        if i == len(present) - 1:
+            right = col.right
+        else:
+            right = _shift_boundary(col.right, words, max_shift)
+        if prev_right is not None:
+            left = max(left, prev_right)  # 保证边界单调，列不重叠
+        if right <= left:
+            left, right = col.left, col.right  # 修正失败：退回表头边界
+        new_bounds[col.key] = (left, right)
+        prev_right = right
+
+    refined = any(
+        abs(new_bounds[col.key][0] - col.left) > _EPS
+        or abs(new_bounds[col.key][1] - col.right) > _EPS
+        for col in present
+    )
+    for col in present:
+        col.left, col.right = new_bounds[col.key]
+    return refined, alignment
+
+
+def _shift_boundary(boundary: float, words: list[Word], max_shift: float) -> float:
+    """把一条内部边界移到"左右两列数据簇空隙"的中间；偏移超限则不动。"""
+    near_left = [w.cx for w in words if boundary - max_shift <= w.cx < boundary]
+    near_right = [w.cx for w in words if boundary <= w.cx <= boundary + max_shift]
+    if not near_left or not near_right:
+        return boundary
+    candidate = (max(near_left) + min(near_right)) / 2
+    if abs(candidate - boundary) > max_shift:
+        return boundary
+    return candidate
+
+
+def table_evidence(result: TableResult, config: dict[str, Any]) -> dict[str, float]:
+    """表格证据（方案 §8.3）：表头命中 / 必需列 / 行一致性 / 列对齐。"""
+    columns = result.columns
+    total = len(columns)
+    present = sum(1 for col in columns.values() if col.present)
+    header_score = present / total if total else 0.0
+
+    required = list(config.get("required_columns") or [])
+    if required:
+        missing = [
+            key
+            for key in required
+            if not (columns.get(key) is not None and columns[key].present)
+        ]
+        required_score = 1.0 - len(missing) / len(required)
+    else:
+        required_score = header_score
+
+    if result.items:
+        solid = sum(
+            1
+            for item in result.items
+            if item.get("name") and any(item.get(key) for key in DATA_COLUMNS)
+        )
+        row_score = solid / len(result.items)
+    else:
+        row_score = 0.0
+
+    scores = {
+        "header": header_score,
+        "required_columns": required_score,
+        "row_consistency": row_score,
+    }
+    if result.alignment_score is not None:
+        scores["column_alignment"] = result.alignment_score
+    return scores
+
+
+def table_score(result: TableResult | None, config: dict[str, Any] | None) -> float | None:
+    """表格综合分 0~1；未配置表格或无列可评时返回 None（不参与文档分）。
+
+    加权而非等权：**模板声明的必需列**（required_columns）是否齐全最能说明
+    表格是否可用；"所有配置列都出现"不可靠——不同版式本就没有全部列
+    （建筑服务数电票没有"建筑服务发生地"表头，它在信息块里），等权会把
+    正常表格拖到低分。
+    """
+    if result is None or not config:
+        return None
+    scores = table_evidence(result, config)
+    parts = [
+        (weight, scores[name])
+        for name, weight in _TABLE_EVIDENCE_WEIGHTS.items()
+        if name in scores
+    ]
+    total = sum(weight for weight, _ in parts)
+    if total <= 0:
+        return None
+    return sum(weight * value for weight, value in parts) / total
 
 
 def _column_key_at(columns: dict[str, TableColumn], cx: float) -> str | None:
@@ -637,7 +806,13 @@ def apply_to_report(report: Any, template: dict[str, Any], table: TableResult) -
         result = FieldResult(
             field_name=field_name, raw_value=value, normalized_value=value, parser=TABLE_PARSER
         )
-        report.fields[field_name] = validate_field(result, spec)
+        validated = validate_field(result, spec)
+        validated.strategy = "table"
+        # V2（方案 §11）：表格值覆盖锚点值时，保留锚点结果作为候选参与选优
+        previous = report.fields.get(field_name)
+        if previous is not None:
+            report.table_replaced[field_name] = previous
+        report.fields[field_name] = validated
         applied.append(field_name)
 
     synthetic: dict[str, str] = {"item_rows": str(len(table.items))}

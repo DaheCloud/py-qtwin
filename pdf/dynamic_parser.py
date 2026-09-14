@@ -19,6 +19,12 @@ from typing import Any
 import pymupdf
 
 from pdf.normalizers import normalize_amount, normalize_date, normalize_text
+from pdf.policies import (
+    REGION_DOCUMENT,
+    REGION_FAIL,
+    REGION_PAGE,
+    field_region_policy,
+)
 from pdf.pymupdf_parser import ParseReport
 from pdf.region_engine import field_words
 from pdf.table_engine import apply_to_report, extract_table_multipage
@@ -207,6 +213,7 @@ def extract_anchor_field(
     spec: dict[str, Any],
     parser_name: str = "pymupdf-dynamic",
     anchor_words: list[_Word] | None = None,
+    page: int | None = None,
 ) -> FieldResult:
     """按 anchor/direction 规则从给定词列表提取字段。
 
@@ -230,8 +237,10 @@ def extract_anchor_field(
     """
     anchor = spec.get("anchor")
     if isinstance(anchor, (list, tuple)):
-        return _extract_first_anchor(name, words, spec, parser_name, anchor_words, list(anchor))
-    return _extract_single_anchor(name, words, spec, parser_name, anchor_words)
+        return _extract_first_anchor(
+            name, words, spec, parser_name, anchor_words, list(anchor), page
+        )
+    return _extract_single_anchor(name, words, spec, parser_name, anchor_words, page)
 
 
 def _extract_first_anchor(
@@ -241,6 +250,7 @@ def _extract_first_anchor(
     parser_name: str,
     anchor_words: list[_Word] | None,
     anchors: list[str],
+    page: int | None = None,
 ) -> FieldResult:
     """候选锚点按序尝试：任一取到值即返回，全部失败汇总为一个失败结果。
 
@@ -251,12 +261,13 @@ def _extract_first_anchor(
     last_error = ""
     for anchor in anchors:
         result = _extract_single_anchor(
-            name, words, {**spec, "anchor": anchor}, parser_name, anchor_words
+            name, words, {**spec, "anchor": anchor}, parser_name, anchor_words, page
         )
         if result.valid and result.normalized_value:
             return result
         last_error = result.errors[-1] if result.errors else ""
-    result = FieldResult(name, "", parser=parser_name)
+    result = FieldResult(name, "", parser=parser_name, page=page, region=spec.get("region"))
+    result.anchor_hit = False
     suffix = f"（最后错误：{last_error}）" if last_error else ""
     result.fail(f"候选锚点 {anchors} 均未提取成功{suffix}")
     return apply_optional(result, spec)
@@ -268,11 +279,13 @@ def _extract_single_anchor(
     spec: dict[str, Any],
     parser_name: str,
     anchor_words: list[_Word] | None,
+    page: int | None = None,
 ) -> FieldResult:
     """单一锚点的提取实现（供 extract_anchor_field 调用）。"""
     anchor = spec.get("anchor")
     if not anchor:
-        result = FieldResult(name, "", parser=parser_name)
+        result = FieldResult(name, "", parser=parser_name, page=page)
+        result.anchor_hit = False
         result.fail("动态规则缺少 anchor 配置")
         return result
 
@@ -296,9 +309,13 @@ def _extract_single_anchor(
                 matches.append(value_word)
         if matches:
             chosen = matches[-1] if pick == "last" else matches[0]
-            return _build_field_result(name, chosen, spec, parser_name)
+            return _build_field_result(
+                name, chosen, spec, parser_name, page=page, candidate_count=len(matches)
+            )
 
-    result = FieldResult(name, "", parser=parser_name)
+    result = FieldResult(name, "", parser=parser_name, page=page, region=spec.get("region"))
+    # 锚点本身是否存在：命中锚点但值不合法 ≠ 锚点未命中，两者证据含义不同
+    result.anchor_hit = bool(groups)
     seen: list[str] = []
     for _anchor_word, candidates in groups:
         for _quality, word in candidates:
@@ -316,9 +333,15 @@ def _extract_single_anchor(
 
 
 def _build_field_result(
-    name: str, value_word: _Word, spec: dict[str, Any], parser_name: str
+    name: str,
+    value_word: _Word,
+    spec: dict[str, Any],
+    parser_name: str,
+    *,
+    page: int | None = None,
+    candidate_count: int = 0,
 ) -> FieldResult:
-    """把候选词归一化 + 校验后包装成 FieldResult。"""
+    """把候选词归一化 + 校验后包装成 FieldResult（含 V2 取值溯源）。"""
     value = _clean_value_text(value_word.text)
     normalizer = _NORMALIZERS.get(spec.get("type", "string"), normalize_text)
     normalized = normalizer(value) if value else None
@@ -329,6 +352,11 @@ def _build_field_result(
         raw_value=value,
         normalized_value=normalized,
         parser=parser_name,
+        page=page,
+        rect=(value_word.x0, value_word.y0, value_word.x1, value_word.y1),
+        anchor_hit=True,
+        region=spec.get("region"),
+        candidate_count=candidate_count,
     )
     return validate_field(result, spec)
 
@@ -527,14 +555,16 @@ def extract_field_cross_page(
     anchor_words_fn(p) -> list[Word]：第 p 页锚点词表（交叉验证用宽松切词
     合成完整标签；缺省与候选词表相同）。
 
-    策略：
+    策略（V2，方案 §3 / §4）：
     1. 配置页优先，失败按页序兜底（字段可能被排到后续页）；
-    2. 带 region 的字段在**某页 region 无法解析**（该页缺少区域锚标签，如
-       合计行不在第 1 页）时跳过该页——此时该页取值不受 region 约束，
-       pick=last 会取到明细行的错值并挡住后续页；
-    3. 全部单页失败后，用"配置页 + 后续页"的扩展画布再试一次——锚点在
-       配置页（如"金额"表头）、值在后续页（合计行被排到第 2 页）的场景
-       只有画布能同时看到两者。
+    2. 带 region 的字段**只在区域可解析的页取值**（区域约束始终生效）：
+       某页缺少区域锚标签时该页不参与（pick=last 会取到明细行的错值并挡住
+       后续页），区域在第 2 页能解析时就正常从第 2 页取——跨页不等于放弃约束；
+    3. 所有页都解析不出该区域时，才按 region_failure_policy 决定：
+       **fail** = 就地失败（关键字段默认，拒绝退回全页）；
+       **page** = 仅配置页退回全页取值；**document** = 用"配置页 + 后续页"
+       画布退回全文（跨页）；
+    4. 未配置 region 的字段保持原行为：单页失败后走画布兜底。
     """
     page_no = int(spec.get("page", 0))
     order = field_page_order(page_no, total_pages)
@@ -543,26 +573,35 @@ def extract_field_cross_page(
         result.fail(f"页码 {page_no} 超出文档范围（共 {total_pages} 页）")
         return result
 
+    policy = field_region_policy(template, spec)
+    region_name = spec.get("region")
+
     first_result: FieldResult | None = None
+    region_resolved = False
     for p in order:
         words = page_words_fn(p)
         anchors = anchor_words_fn(p) if anchor_words_fn else None
         scoped = field_words(words, template, spec)
-        if spec.get("region") and scoped is words:
-            # 该页解析不出字段所属区域（区域锚标签不在本页）：本页取值
-            # 不受 region 约束、不可信，跳过（取值交给后续页/画布兜底）
+        if region_name and scoped is words:
+            # 该页解析不出字段所属区域：本页取值不受区域约束、不可信 → 不用它
             continue
+        if region_name:
+            region_resolved = True
+
         if scoped is words:
             result = extract_anchor_field(
                 name, words, spec,
                 parser_name=parser_name,
                 anchor_words=anchors if anchor_words_fn else None,
+                page=p,
             )
         else:
             # Region 是主要搜索空间：锚点与候选都先限制在 Region 内；
-            # Region 内找不到锚点/取不到值时，锚点回退全页查找（交叉验证用
-            # 宽松词表），候选仍限制在 Region 内
-            result = extract_anchor_field(name, scoped, spec, parser_name=parser_name)
+            # Region 内取不到值时，锚点回退全页查找（交叉验证用宽松词表），
+            # 候选仍限制在 Region 内
+            result = extract_anchor_field(
+                name, scoped, spec, parser_name=parser_name, page=p
+            )
             if not (result.valid and result.normalized_value):
                 result = extract_anchor_field(
                     name,
@@ -570,11 +609,42 @@ def extract_field_cross_page(
                     spec,
                     parser_name=parser_name,
                     anchor_words=anchors if anchor_words_fn is not None else words,
+                    page=p,
                 )
+            result.region_used = True
         if p == page_no:
             first_result = result
         if result.valid and result.normalized_value:
             return result
+
+    if region_name and not region_resolved:
+        # 各页都没解析出该区域：取值必然不受区域约束 → 由策略决定怎么处理
+        if policy == REGION_FAIL:
+            # 关键字段默认策略（方案 §4.2）：宁可转人工复核，也不从明细行/
+            # 备注区取一个"格式合法但位置错误"的值
+            result = FieldResult(
+                name, "", parser=parser_name, page=page_no, region=region_name
+            )
+            result.anchor_hit = False
+            result.fail(
+                f"区域 {region_name!r} 各页均未解析，region_failure_policy=fail 拒绝退回全页"
+            )
+            return apply_optional(result, spec)
+        if policy == REGION_PAGE:
+            # 退回配置页全页取值（page 语义：不跨页，跨页由 document 策略负责）
+            words = page_words_fn(page_no)
+            anchors = anchor_words_fn(page_no) if anchor_words_fn else None
+            result = extract_anchor_field(
+                name,
+                words,
+                spec,
+                parser_name=parser_name,
+                anchor_words=anchors if anchor_words_fn else None,
+                page=page_no,
+            )
+            result.region_fallback = REGION_PAGE
+            return result
+        # REGION_DOCUMENT：继续走到下方画布兜底（跨页）
 
     # 全部单页失败：扩展画布（配置页 + 后续页）兜底。
     # 单页文档也走这一步：画布等于该页词表，等价"region 不可解析时退回未约束
@@ -611,12 +681,22 @@ def extract_field_cross_page(
                 parser_name=parser_name,
                 anchor_words=(canvas_anchors if anchor_words_fn is not None else canvas),
             )
+        canvas_result.region_used = True
     if canvas_result.valid and canvas_result.normalized_value:
+        # V2（方案 §4.3）：只有"画布上仍解析不出区域"（scoped is canvas）才是
+        # 真正的回退；画布上区域可解析时取值仍受区域约束（region_used=True），
+        # 只是跨页取值，不能记成回退扣分。
+        if region_name and scoped is canvas:
+            # 多页画布 = document（跨页），单页画布 = page（退回本页全页）
+            canvas_result.region_fallback = (
+                REGION_DOCUMENT if len(order) > 1 else REGION_PAGE
+            )
         return canvas_result
 
     if first_result is not None:
         return first_result
-    result = FieldResult(name, "", parser=parser_name)
+    result = FieldResult(name, "", parser=parser_name, region=region_name)
+    result.anchor_hit = False
     result.fail(f"各页均未提取到 {name}（含跨页画布兜底）")
     return result
 

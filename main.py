@@ -20,15 +20,18 @@ if sys.stdout is not None and sys.stdout.encoding and sys.stdout.encoding.lower(
     except (AttributeError, OSError):
         pass
 
-from database.db import get_engine, init_db, make_session_factory
+from database.db import get_engine, make_session_factory
 from paths import default_db_path, ensure_data_dir, templates_dir
 from pdf.template_engine import TemplateEngine
 from services.pdf_service import PdfService
+from ui.bootstrap import bootstrap_database, install_excepthook, setup_logging
 
 
 def run_cli(args: argparse.Namespace) -> int:
+    # 与 GUI 相同的启动对齐：老库自动补齐新增表/列（迁移前自动备份）
+    if bootstrap_database(args.db) is None:
+        return 3
     engine = get_engine(args.db)
-    init_db(engine)
     factory = make_session_factory(engine)
 
     engine_templates = TemplateEngine(templates_dir())
@@ -65,6 +68,9 @@ def run_cli(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     # 尽早建立数据目录并迁移旧版 exe 同目录数据（数据根已移至 %APPDATA%）
     ensure_data_dir()
+    # 日志 + 异常兜底：打包成 windowed exe 后没有控制台，问题只能靠日志定位
+    setup_logging()
+    install_excepthook()
     parser = argparse.ArgumentParser(description="固定结构 PDF 识别工具")
     parser.add_argument("pdf", nargs="?", help="要处理的 PDF 文件路径")
     parser.add_argument("--cli", action="store_true", help="使用命令行模式而不启动 GUI")
@@ -80,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # GUI 模式（管理后台外壳）；如带 PDF 参数，直接走一轮上传入队
     app = create_app()
+    # 老库结构自动升级（缺表/缺列/索引补齐，升级前自动备份）；
+    # 真打不开时弹出人话提示，而不是静默崩溃
+    if bootstrap_database(args.db) is None:
+        return 3
     window = MainWindow(db_path=args.db)
     window.show()
     if args.pdf:

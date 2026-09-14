@@ -74,3 +74,12 @@ def templates_dir() -> Path:
 def default_db_path() -> str:
     """默认 SQLite 路径；打包后位于 %APPDATA%\\PdfDataTool\\app.db。"""
     return str(data_dir() / _DB_FILENAME)
+
+
+def log_dir() -> Path:
+    """日志目录（打包后无控制台，启动/异常信息只能靠日志文件排查）。"""
+    return data_dir() / "logs"
+
+
+def log_file_path() -> Path:
+    return log_dir() / "app.log"

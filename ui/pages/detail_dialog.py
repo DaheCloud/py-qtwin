@@ -23,9 +23,51 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from services.pdf_service import final_display_status
 from ui.field_labels import field_label
 from ui.styles import GREEN, RED, token, ui_font
 from ui.widgets.common import Badge
+
+# 证据维度中文名（方案 §20：让复核人员直接看到"为什么需要复核"）
+_EVIDENCE_LABELS = {
+    "anchor": "锚点定位",
+    "geometry": "取值位置",
+    "region": "页面区域",
+    "pattern": "格式",
+    "cross_engine": "双引擎一致",
+    "business": "业务关系",
+}
+# 证据分低于此值视为"弱证据"（与 evidence/scorer.FIELD_MEDIUM 保持一致）
+_EVIDENCE_WEAK = 0.75
+
+
+def _evidence_lines(evidence_json: str | None, confidence: float | None) -> list[str]:
+    """把落库的字段证据转成几行可读文本（可信度 + 逐维度 + 原因）。"""
+    import json as _json
+
+    lines: list[str] = []
+    data = None
+    if evidence_json:
+        try:
+            data = _json.loads(evidence_json)
+        except (TypeError, ValueError):
+            data = None
+    score = None
+    if isinstance(data, dict):
+        score = data.get("score")
+    if score is None:
+        score = confidence
+    if score is not None:
+        lines.append(f"可信度 {float(score) * 100:.0f}%")
+    if isinstance(data, dict):
+        for name, value in (data.get("evidence") or {}).items():
+            mark = "✓" if float(value) >= _EVIDENCE_WEAK else "✗"
+            lines.append(
+                f"{mark} {_EVIDENCE_LABELS.get(name, name)} {float(value) * 100:.0f}%"
+            )
+        for reason in (data.get("reasons") or [])[:2]:
+            lines.append(f"· {reason}")
+    return lines
 
 
 def _clear_layout(layout) -> None:
@@ -280,10 +322,26 @@ class DetailDialog(QDialog):
                 self._add_hint("未找到该文档记录")
                 return
             status = doc.status
+            review_status = doc.review_status
+            quality_status = doc.quality_status
+            document_score = doc.document_score
+            display_status = final_display_status(doc)
             error_reason = doc.error_reason
             identify_confidence = doc.identify_confidence
             parse_confidence = doc.parse_confidence
-            fields = [(f.field_name, f.raw_value, f.normalized_value, f.parser) for f in doc.fields]
+            fields = [
+                (
+                    f.field_name,
+                    f.raw_value,
+                    f.normalized_value,
+                    f.parser,
+                    float(f.confidence) if f.confidence is not None else None,
+                    f.evidence_json,
+                    f.strategy,
+                    bool(f.fallback_used),
+                )
+                for f in doc.fields
+            ]
             verifications = [
                 (v.field_name, v.primary_value, v.secondary_value, v.matched, v.review_status)
                 for v in doc.verifications
@@ -310,12 +368,42 @@ class DetailDialog(QDialog):
         _clear_layout(self._fields_l)
 
         self._doc_status = status
-        self._confirm_doc_btn.setVisible(status in ("manual_review", "warning"))
+        # V2（方案 §10）：能确认的判据是"复核状态待处理"，不再只看展示状态
+        if review_status:
+            self._confirm_doc_btn.setVisible(review_status == "pending")
+        else:
+            self._confirm_doc_btn.setVisible(status in ("manual_review", "warning"))
 
         kind, text = _badge_for_status(status)
         badge = Badge(text, kind)
         badge.setFont(ui_font(9, 500))
         self._status_badge_host.addWidget(badge)
+
+        # V2（方案 §9）：三维状态与文档质量分——机器结论不被人工确认覆盖
+        if quality_status or document_score is not None or display_status != text:
+            detail_parts = [f"展示状态：{display_status}"]
+            if quality_status:
+                quality_label = {
+                    "valid": "质量合格",
+                    "warning": "质量存疑",
+                    "invalid": "数据异常",
+                    "unknown": "质量未知",
+                }.get(quality_status, quality_status)
+                detail_parts.append(f"质量：{quality_label}")
+            if review_status:
+                review_label = {
+                    "not_required": "无需复核",
+                    "pending": "待复核",
+                    "confirmed": "已人工确认",
+                    "corrected": "已人工修正",
+                    "rejected": "已驳回",
+                }.get(review_status, review_status)
+                detail_parts.append(f"复核：{review_label}")
+            if document_score is not None:
+                detail_parts.append(f"文档质量分 {float(document_score):.2f}")
+            dimension = QLabel(" · ".join(detail_parts))
+            dimension.setStyleSheet(f"color: {token('TEXT_MUTED')}; font-size: 12px;")
+            self._status_badge_host.addWidget(dimension)
 
         # 置信度（方案 §10/§31）：识别/解析/综合分开显示，便于判断"是选错模板还是取错值"
         if identify_confidence is not None or parse_confidence is not None:
@@ -357,8 +445,9 @@ class DetailDialog(QDialog):
             }
             if error_reason:
                 review_fields.update(seg.split("：", 1)[0].strip() for seg in error_reason.split("；") if seg)
-            for name, raw, normalized, parser in fields:
-                self._add_field_row(name, raw, normalized, parser, needs_review=name in review_fields)
+            for row_data in fields:
+                name = row_data[0]
+                self._add_field_row(*row_data, needs_review=name in review_fields)
 
         if items:
             self._add_items_section(items)
@@ -403,7 +492,16 @@ class DetailDialog(QDialog):
         self._fields_l.addWidget(label)
 
     def _add_field_row(
-        self, name: str, raw: str | None, normalized: str | None, parser: str, needs_review: bool = False
+        self,
+        name: str,
+        raw: str | None,
+        normalized: str | None,
+        parser: str,
+        confidence: float | None = None,
+        evidence_json: str | None = None,
+        strategy: str = "primary",
+        fallback_used: bool = False,
+        needs_review: bool = False,
     ) -> None:
         row = QFrame()
         row.setObjectName("Card")
@@ -442,6 +540,21 @@ class DetailDialog(QDialog):
             raw_label.setObjectName("MutedText")
             raw_label.setWordWrap(True)
             row_l.addWidget(raw_label)
+
+        # V2（方案 §20）：逐维度证据 + 来源策略，回答"为什么需要复核"
+        lines = _evidence_lines(evidence_json, confidence)
+        if strategy == "table":
+            lines.append("· 取值来源：明细表格重建")
+        elif strategy == "fallback":
+            lines.append("· 取值来源：锚点兜底")
+        elif fallback_used:
+            lines.append("· 该字段曾触发兜底")
+        if lines:
+            evidence_label = QLabel("\n".join(lines))
+            evidence_label.setObjectName("MutedText")
+            evidence_label.setWordWrap(True)
+            evidence_label.setStyleSheet(f"color: {token('TEXT_MUTED')}; font-size: 12px;")
+            row_l.addWidget(evidence_label)
 
         self._fields_l.addWidget(row)
 
@@ -585,11 +698,14 @@ class DetailDialog(QDialog):
         self.load_document()  # 重建列表反映确认结果
 
     def _confirm_document(self) -> None:
-        """整体确认：全部待复核项标记确认，文档状态流转为准确。"""
-        from datetime import datetime, timezone
+        """整体确认：全部待复核项标记确认，文档状态流转为准确。
 
+        落库语义与筛选页的「一键确认」共用 services/review_service.py，
+        保证两条入口结果一致。
+        """
         from database.db import get_engine, make_session_factory
-        from models.document import AuditLog, Document
+        from models.document import Document
+        from services.review_service import confirm_document
 
         answer = QMessageBox.question(
             self, "确认无误", "确认所有字段与 PDF 原文一致，并将该文档标记为「准确」？"
@@ -602,21 +718,7 @@ class DetailDialog(QDialog):
             doc = session.get(Document, self._doc_id)
             if doc is None:
                 return
-            doc.status = "success"
-            doc.error_reason = None
-            now = datetime.now(timezone.utc)
-            for v in doc.verifications:
-                if v.review_status != "confirmed":
-                    v.review_status = "confirmed"
-                    v.reviewed_value = v.primary_value
-                    v.reviewed_at = now
-            session.add(
-                AuditLog(
-                    document_id=self._doc_id,
-                    action="manual_confirm",
-                    detail="status=success",
-                )
-            )
+            confirm_document(session, doc, source="detail_dialog")
             session.commit()
         self.load_document()
         self.document_confirmed.emit(self._doc_id)
