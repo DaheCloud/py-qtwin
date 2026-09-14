@@ -128,6 +128,31 @@ class TestHeaderAndColumns:
         assert "table_header_not_found" in result.issues
         assert result.items == []
 
+    def test_total_labels_are_not_treated_as_detail_headers(self):
+        words = [
+            _Word(350, 251, 400, 260, "合计金额"),
+            _Word(500, 251, 550, 260, "合计税额"),
+            _Word(350, 273, 400, 282, "850778.42"),
+            _Word(500, 273, 550, 282, "110601.20"),
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert not result.ok
+        assert "table_header_not_found" in result.issues
+        assert result.items == []
+
+    def test_single_column_label_is_not_enough_to_start_table(self):
+        words = [
+            _Word(350, 251, 368, 260, "金额"),
+            _Word(350, 273, 400, 282, "850778.42"),
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert not result.ok
+        assert "table_header_not_found" in result.issues
+
     def test_missing_optional_column_flagged(self):
         """规格型号/单位列不存在：列标 missing（可选列不影响 items）。"""
         words = [*_header(), *_data_row(273), *_totals_row(360)]
@@ -747,6 +772,7 @@ class TestItemsValidation:
         total = next(c for c in checks if c.rule == "sum_amount")
         assert total.failed and total.severity == "error"
         assert "Σ明细金额" in total.detail
+        assert "明细：100.00 + 200.00" in total.detail
 
     def test_business_skips_sums_when_rows_incomplete(self):
         """行内缺金额 → Σ 校验记 skipped（留痕不误报），逐行校验只覆盖完整行。"""

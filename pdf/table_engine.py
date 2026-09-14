@@ -310,7 +310,13 @@ def _columns_from_config(config: dict[str, Any]) -> dict[str, TableColumn]:
 
 
 def _matches(text: str, headers: tuple[str, ...]) -> bool:
-    return any(header in text for header in headers)
+    compact = text.replace(" ", "")
+    # 表尾汇总标签不是明细列标题，不能因“金额/税额”子串而启动表格重建。
+    if "合计" in compact and all(
+        compact != header.replace(" ", "") for header in headers
+    ):
+        return False
+    return any(header.replace(" ", "") in compact for header in headers)
 
 
 def _find_header(words: list[Word], columns: dict[str, TableColumn]) -> _HeaderRow | None:
@@ -337,7 +343,8 @@ def _find_header(words: list[Word], columns: dict[str, TableColumn]) -> _HeaderR
             and row[0].y0 < best_row[0].y0  # 并列取最靠上的一行
         ):
             best_row, best_cover = row, cover
-    if best_row is None or best_cover <= 0:
+    # 单个金额类词不足以证明存在明细表，至少需要同一行命中两个列标题。
+    if best_row is None or best_cover < 2:
         return None
 
     band = _band_words(words, best_row, tol)

@@ -162,11 +162,14 @@ def _check_sums(
             )
             continue
         expected = sum(values, Decimal("0"))
+        value_details = " + ".join(money(value) for value in values[:5])
+        if len(values) > 5:
+            value_details += f" + …（共 {len(values)} 行）"
         results.append(
             CheckResult(
                 rule,
                 approx_equal(expected, actual),
-                f"{label}={money(expected)} vs 合计={money(actual)}",
+                f"{label}={money(expected)}（明细：{value_details}） vs 合计={money(actual)}",
                 severity=severity_for(expected, actual),
                 fields=(field_key,),
             )
