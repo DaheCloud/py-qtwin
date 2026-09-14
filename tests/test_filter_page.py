@@ -132,11 +132,10 @@ def test_export_includes_success_and_suspect_but_skips_failed(
     prompts = []
     monkeypatch.setattr(
         QMessageBox,
-        "question",
-        staticmethod(
-            lambda *args, **kwargs: (
-                prompts.append(args[2]) or QMessageBox.StandardButton.Yes
-            )
+        "exec",
+        lambda dialog: (
+            prompts.append((dialog.text(), dialog.minimumWidth()))
+            or QMessageBox.StandardButton.Yes
         ),
     )
 
@@ -149,9 +148,10 @@ def test_export_includes_success_and_suspect_but_skips_failed(
 
     page._export_selected()
 
-    assert "准确数据：1 条" in prompts[0]
-    assert "可疑数据：2 条" in prompts[0]
-    assert "不可导出并跳过：1 条" in prompts[0]
+    assert "准确数据：1 条" in prompts[0][0]
+    assert "可疑数据：2 条" in prompts[0][0]
+    assert "不可导出并跳过：1 条" in prompts[0][0]
+    assert prompts[0][1] == 300
     from openpyxl import load_workbook
 
     ws = load_workbook(output, read_only=True).active
@@ -173,8 +173,8 @@ def test_export_cancel_stops_before_file_dialog(confirm_page, monkeypatch):
     save_dialog_opened = []
     monkeypatch.setattr(
         QMessageBox,
-        "question",
-        staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.No),
+        "exec",
+        lambda dialog: QMessageBox.StandardButton.No,
     )
     monkeypatch.setattr(
         QFileDialog,

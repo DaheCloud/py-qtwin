@@ -670,7 +670,21 @@ class FilterPage(QWidget):
         if skipped_n:
             message += f"\n不可导出并跳过：{skipped_n} 条"
         message += "\n\n是否继续导出？"
-        answer = QMessageBox.question(self, "确认导出", message)
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("确认导出")
+        confirm.setIcon(QMessageBox.Icon.Question)
+        confirm.setText(message)
+        confirm.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        confirm.setDefaultButton(QMessageBox.StandardButton.Yes)
+        confirm.setMinimumWidth(300)
+        # 只约束正文标签，不直接修改 QMessageBox 的网格列，避免撑出大片空白。
+        message_label = confirm.findChild(QLabel, "qt_msgbox_label")
+        if message_label is not None:
+            message_label.setMinimumWidth(220)
+            message_label.setWordWrap(True)
+        answer = confirm.exec()
         if answer != QMessageBox.StandardButton.Yes:
             return
 
