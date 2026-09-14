@@ -66,8 +66,14 @@ def region_bounds(
     if not isinstance(config, dict):
         return None
 
-    start_y = _line_y(words, config.get("start_anchor"))
-    end_y = _line_y(words, config.get("end_anchor"))
+    start_anchor = config.get("start_anchor")
+    end_anchor = config.get("end_anchor")
+    start_y = _line_y(words, start_anchor)
+    end_y = _line_y(words, end_anchor)
+    # 配置了动态边界就必须命中。仅靠另一侧静态边界把区域扩成大半页，
+    # 会把“Region 找不到”伪装成“Region 已解析”。
+    if (start_anchor and start_y is None) or (end_anchor and end_y is None):
+        return RegionBounds(name=name, start_y=start_y, end_y=end_y, resolved=False)
     if config.get("start_y") is not None:
         value = float(config["start_y"])
         start_y = value if start_y is None else min(start_y, value)

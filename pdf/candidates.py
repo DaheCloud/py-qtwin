@@ -57,13 +57,13 @@ class FieldCandidate:
     @property
     def has_value(self) -> bool:
         """是否有可用取值（候选可比较/可落库的前提）。"""
-        return bool(self.normalized_value)
+        return self.valid and self.normalized_value is not None and str(self.normalized_value) != ""
 
     def as_dict(self) -> dict[str, Any]:
         """审计日志用。"""
         return {
             "field": self.field_name,
-            "value": self.normalized_value,
+            "value": _json_value(self.normalized_value),
             "raw_value": self.raw_value,
             "page": self.page,
             "rect": [round(v, 2) for v in self.rect] if self.rect else None,
@@ -101,6 +101,12 @@ def candidate_from_result(
         candidate_count=int(getattr(result, "candidate_count", 0) or 0),
         source_result=result,
     )
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def rank_candidates(candidates: list[FieldCandidate]) -> list[FieldCandidate]:

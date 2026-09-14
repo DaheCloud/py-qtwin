@@ -24,7 +24,8 @@
 ------------------
 * v1：documents / extracted_fields / verification_results / templates / audit_logs
 * v2：documents 增列（template_version、error_reason、三个 confidence 列）；
-      新增 extracted_items（Table Engine 明细行，方案 §15）
+       新增 extracted_items（Table Engine 明细行，方案 §15）
+* v3：V2 三维状态、文档质量分，以及字段 evidence/fallback/strategy
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from sqlalchemy.schema import CreateIndex
 from models.document import Base
 
 # 当前程序期望的结构版本（每次改动 model/表结构都要 +1）
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DIALECT = sqlite_dialect.dialect()
 
@@ -148,6 +149,7 @@ def upgrade(engine, *, backup: bool = True, rebuild_corrupt: bool = True) -> Mig
         report.backup_path = _str(backup_database(path, tag=f"v{version}"))
 
     changes = _reconcile(engine)
+    _backfill_v3(engine, changes.added_columns)
     report.created_tables = changes.created_tables
     report.added_columns = changes.added_columns
     report.created_indexes = changes.created_indexes
@@ -157,6 +159,36 @@ def upgrade(engine, *, backup: bool = True, rebuild_corrupt: bool = True) -> Mig
         _write_version(engine, SCHEMA_VERSION)
     report.to_version = SCHEMA_VERSION
     return report
+
+
+def _backfill_v3(engine, added_columns: list[str]) -> None:
+    """根据旧 status 补齐历史行的三维状态，保留机器原始结论。"""
+    state_columns = {
+        "documents.processing_status",
+        "documents.quality_status",
+        "documents.review_status",
+    }
+    if not state_columns.intersection(added_columns):
+        return
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE documents
+            SET processing_status = CASE
+                    WHEN status = 'needs_ocr' THEN 'needs_ocr'
+                    WHEN status = 'failed' THEN 'completed'
+                    ELSE 'completed'
+                END,
+                quality_status = CASE
+                    WHEN status = 'success' THEN 'valid'
+                    WHEN status IN ('manual_review', 'warning') THEN 'warning'
+                    WHEN status = 'failed' THEN 'invalid'
+                    ELSE 'unknown'
+                END,
+                review_status = CASE
+                    WHEN status IN ('manual_review', 'warning', 'failed') THEN 'pending'
+                    ELSE 'not_required'
+                END
+        """))
 
 
 def backup_database(path: Path, *, tag: str) -> Path | None:

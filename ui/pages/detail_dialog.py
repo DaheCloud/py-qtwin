@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services.pdf_service import final_display_status
+from pdf.states import final_display_status
 from ui.field_labels import field_label
 from ui.styles import GREEN, RED, token, ui_font
 from ui.widgets.common import Badge

@@ -116,8 +116,8 @@ class TestConfirmDocuments:
             "failed.pdf": "failed",  # 失败记录不参与一键确认
         }
 
-    def test_confirmed_document_is_cleaned_up(self, factory):
-        """error_reason 清空（已人工核对，不再提示），状态变准确。"""
+    def test_confirmed_document_preserves_machine_reason(self, factory):
+        """人工确认只改复核结论，机器当时的风险原因必须继续可审计。"""
         ids = _seed(factory)
 
         with factory() as session:
@@ -127,7 +127,9 @@ class TestConfirmDocuments:
         with factory() as session:
             doc = session.get(Document, ids["review"])
             assert doc.status == "success"
-            assert doc.error_reason is None
+            assert doc.error_reason == "交叉验证不一致：grand_total"
+            assert doc.quality_status == "warning"
+            assert doc.review_status == "confirmed"
 
     def test_verifications_marked_confirmed_with_value_and_time(self, factory):
         ids = _seed(factory)

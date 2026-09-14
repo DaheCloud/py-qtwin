@@ -114,6 +114,8 @@ class TableColumn:
             "headers": list(self.headers),
             "x0": round(self.header.x0, 2) if self.header else None,
             "x1": round(self.header.x1, 2) if self.header else None,
+            "left": round(self.left, 2) if self.left != float("-inf") else None,
+            "right": round(self.right, 2) if self.right != float("inf") else None,
         }
 
 

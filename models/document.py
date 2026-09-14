@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -29,11 +29,16 @@ class Document(Base):
     template_id: Mapped[str | None] = mapped_column(String(100))
     template_version: Mapped[str | None] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    # V2 三维状态；status 暂时保留为兼容展示字段。
+    processing_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    quality_status: Mapped[str] = mapped_column(String(20), default="unknown", index=True)
+    review_status: Mapped[str] = mapped_column(String(20), default="not_required", index=True)
     error_reason: Mapped[str | None] = mapped_column(Text)  # 人话错误/警告原因（失败/待确认时）
     # 规则式置信度（方案 §10/§31）：识别/解析/校验三维分开存 + 综合分，便于统计与审计
     identify_confidence: Mapped[int | None] = mapped_column(Integer)
     parse_confidence: Mapped[int | None] = mapped_column(Integer)
     overall_confidence: Mapped[int | None] = mapped_column(Integer)
+    document_score: Mapped[float | None] = mapped_column(Float)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -52,7 +57,10 @@ class ExtractedField(Base):
     raw_value: Mapped[str | None] = mapped_column(Text)
     normalized_value: Mapped[str | None] = mapped_column(Text)
     parser: Mapped[str] = mapped_column(String(50), default="pymupdf")
-    confidence: Mapped[float] = mapped_column(default=1.0)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    evidence_json: Mapped[str | None] = mapped_column(Text)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    strategy: Mapped[str] = mapped_column(String(30), default="primary")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     document: Mapped[Document] = relationship(back_populates="fields")

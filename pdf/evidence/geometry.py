@@ -99,6 +99,9 @@ def geometry_evidence(
         if area:
             # 配了语义位置但没有页面尺寸可比对：保守给分，不算失败
             return evidence(EVIDENCE_GEOMETRY, 0.8, f"配置了位置区域 {area}，缺少页面尺寸无法比对")
+        # 固定解析结果自身带有精确矩形；能从该矩形取到合法值即构成位置证据。
+        if str(getattr(result, "parser", "")) == "pymupdf":
+            return evidence(EVIDENCE_GEOMETRY, 1.0, "固定矩形定位成功")
 
     # 只配了 page 且页序正确：没有位置信息可加分，按"不适用"处理
     return skipped(EVIDENCE_GEOMETRY, "仅校验页序且页序正确")

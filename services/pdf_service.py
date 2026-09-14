@@ -32,6 +32,7 @@ from models.document import (
     VerificationResult,
 )
 from pdf import text_audit
+from pdf.candidates import candidate_from_result, select_best
 from pdf.confidence import (
     PARSE_REVIEW_THRESHOLD,
     identify_confidence,
@@ -41,10 +42,32 @@ from pdf.confidence import (
     validation_confidence,
 )
 from pdf.dynamic_parser import DynamicRegionParser
+from pdf.evidence import (
+    anchor_evidence,
+    business_evidence,
+    cross_engine_evidence,
+    document_score,
+    geometry_evidence,
+    pattern_evidence,
+    region_evidence,
+    score_field,
+)
+from pdf.evidence.scorer import FIELD_MEDIUM, FieldScore
+from pdf.policies import FALLBACK_ANCHOR, field_fallback_policy
 from pdf.pdfplumber_validator import PdfplumberValidator
 from pdf.precheck import precheck_document
 from pdf.pymupdf_parser import FixedRegionParser
 from pdf.template_engine import IdentifyResult, TemplateEngine
+from pdf.table_engine import table_score as calculate_table_score
+from pdf.states import (
+    PROCESSING_COMPLETED,
+    PROCESSING_ERROR,
+    PROCESSING_NEEDS_OCR,
+    QUALITY_INVALID,
+    determine_quality_status,
+    determine_review_status,
+    legacy_status,
+)
 from pdf.validators import (
     SEVERITY_CRITICAL,
     SEVERITY_ERROR,
@@ -167,21 +190,29 @@ class PdfService:
         """
         mode = template.get("mode", "fixed")
         if mode == "dynamic":
-            report = self._dynamic_parser.parse(pdf_path, template)
-            report.used_fallback = True
-            return report
+            return self._dynamic_parser.parse(pdf_path, template)
 
         report = self._parser.parse(pdf_path, template)
-        if report.valid or not template.get("dynamic_fallback", True):
+        fallback_names = [
+            name
+            for name, result in report.fields.items()
+            if not result.valid
+            and field_fallback_policy(template, template.get("fields", {}).get(name, {}))
+            == FALLBACK_ANCHOR
+        ]
+        if report.valid or not fallback_names:
             return report
 
         fallback_report = self._dynamic_parser.parse(pdf_path, {**template, "mode": "dynamic"})
         rebuilt: list[str] = []
         for name, fr in report.fields.items():
-            if fr.valid:
+            if name not in fallback_names:
                 continue
             alt = fallback_report.fields.get(name)
-            if alt is not None and alt.valid:
+            if alt is not None and alt.valid and alt.normalized_value not in (None, ""):
+                report.fallback_replaced[name] = fr
+                alt.fallback_used = True
+                alt.strategy = "fallback"
                 report.fields[name] = alt
                 rebuilt.append(name)
         if rebuilt:
@@ -270,7 +301,7 @@ class PdfService:
 
     def _cross_verify(
         self, pdf_path: str, template: dict[str, Any], report, session: Session, doc: Document
-    ) -> tuple[list, int]:
+    ) -> list:
         """双引擎交叉验证（PyMuPDF vs pdfplumber 独立切词跑同一套锚点规则）。"""
         is_dynamic_template = template.get("mode") == "dynamic"
         verify_fields = {
@@ -288,14 +319,11 @@ class PdfService:
                  else report.fields[name].parser == "pymupdf" and "rect" in spec)
             )
         }
-        if not (report.valid and verify_fields):
-            return [], 0
+        if not verify_fields:
+            return []
 
         vreport = self._validator.verify(pdf_path, {**template, "fields": verify_fields}, report)
-        matched = 0
         for outcome in vreport.outcomes:
-            if outcome.matched:
-                matched += 1
             session.add(
                 VerificationResult(
                     document_id=doc.id,
@@ -306,7 +334,60 @@ class PdfService:
                     review_status="confirmed" if outcome.matched else "pending",
                 )
             )
-        return vreport.mismatches, matched
+        return vreport.outcomes
+
+    @staticmethod
+    def _score_fields(template, report, outcomes, business_checks):
+        """构建候选、融合字段证据并选出最可信结果。"""
+        outcome_by_field = {outcome.field_name: outcome for outcome in outcomes}
+        all_candidates: dict[str, list] = {}
+        field_scores: dict[str, FieldScore] = {}
+
+        for name, spec in template.get("fields", {}).items():
+            sources: list[tuple[Any, str]] = []
+            current = report.fields.get(name)
+            if current is not None:
+                sources.append((current, getattr(current, "strategy", "primary")))
+            if name in report.table_replaced:
+                sources.append((report.table_replaced[name], "primary"))
+            if name in report.fallback_replaced:
+                sources.append((report.fallback_replaced[name], "primary"))
+
+            candidates = []
+            seen: set[int] = set()
+            for result, strategy in sources:
+                if id(result) in seen:
+                    continue
+                seen.add(id(result))
+                candidate = candidate_from_result(name, result, strategy=strategy)
+                field_score = score_field(
+                    name,
+                    [
+                        anchor_evidence(candidate, spec),
+                        geometry_evidence(candidate, spec),
+                        pattern_evidence(candidate, spec),
+                        region_evidence(candidate, spec),
+                        cross_engine_evidence(outcome_by_field.get(name)),
+                        business_evidence(name, business_checks),
+                    ],
+                    fallback_used=candidate.fallback_used or strategy == "fallback",
+                    ambiguous=candidate.candidate_count > 1,
+                )
+                candidate.score = field_score.score
+                candidate.evidence = field_score.evidence
+                candidate.reasons = field_score.reasons
+                candidates.append(candidate)
+
+            best, ordered = select_best(candidates)
+            all_candidates[name] = ordered
+            if best is None:
+                field_scores[name] = FieldScore(name, 0.0, {}, ["没有有效候选值"])
+                continue
+            best.source_result.strategy = best.strategy
+            best.source_result.fallback_used = best.fallback_used or best.strategy == "fallback"
+            report.fields[name] = best.source_result
+            field_scores[name] = FieldScore(name, best.score, best.evidence, best.reasons)
+        return field_scores, all_candidates
 
     # ------------------------------------------------------------ 主流程
 
@@ -332,6 +413,11 @@ class PdfService:
             file_path=pdf_path,
             file_hash=file_hash,
             status=status,
+            processing_status=(
+                PROCESSING_NEEDS_OCR if status == STATUS_NEEDS_OCR else PROCESSING_ERROR
+            ),
+            quality_status="unknown" if status == STATUS_NEEDS_OCR else QUALITY_INVALID,
+            review_status="not_required" if status == STATUS_NEEDS_OCR else "pending",
             error_reason=reason,
             identify_confidence=0,
             parse_confidence=0,
@@ -427,6 +513,9 @@ class PdfService:
             file_hash=file_hash,
             template_id=template.get("template"),
             status=STATUS_PROCESSING,
+            processing_status="processing",
+            quality_status="unknown",
+            review_status="not_required",
         )
         session.add(doc)
         session.flush()  # 取得 doc.id
@@ -434,16 +523,6 @@ class PdfService:
         try:
             # ③ 字段解析（含表格重建：明细 items 行关联在解析时已建立）
             report = self._parse_with_fallback(pdf_path, template)
-            for name, result in report.fields.items():
-                session.add(
-                    ExtractedField(
-                        document_id=doc.id,
-                        field_name=name,
-                        raw_value=result.raw_value,
-                        normalized_value=result.normalized_value,
-                        parser=result.parser,
-                    )
-                )
             items = list(getattr(report, "items", None) or [])
             for item in items:
                 session.add(
@@ -511,12 +590,11 @@ class PdfService:
                 run_secondary = cross_verify
             secondary_forced = cross_verify is True
 
-            mismatches: list = []
-            engine_matched = 0
+            outcomes: list = []
             if run_secondary:
-                mismatches, engine_matched = self._cross_verify(
-                    pdf_path, template, report, session, doc
-                )
+                outcomes = self._cross_verify(pdf_path, template, report, session, doc)
+            mismatches = [outcome for outcome in outcomes if not outcome.matched]
+            engine_matched = sum(1 for outcome in outcomes if outcome.matched)
             for mismatch in mismatches:
                 warnings.append(
                     _finding(
@@ -573,34 +651,70 @@ class PdfService:
                         f"未识别到专属模板，已使用通用锚点模板（{template.get('template')}）解析，需重点复核",
                     ),
                 )
-            parse_conf = parse_confidence(
-                identify=identify,
-                cross_mismatch=len(mismatches),
-                structure_issues=structure_issues,
-                business_failures=len(business_errors),
-                required_missing=required_failed,
-                optional_missing=optional_missing,
+            field_scores, candidates = self._score_fields(template, report, outcomes, business)
+            critical_names = [
+                name for name, spec in template.get("fields", {}).items()
+                if field_severity(spec) == SEVERITY_CRITICAL
+            ]
+            required_names = [
+                name for name, spec in template.get("fields", {}).items()
+                if field_severity(spec) == "required"
+            ]
+            critical_values = [field_scores[name].score for name in critical_names if name in field_scores]
+            required_values = [field_scores[name].score for name in required_names if name in field_scores]
+            critical_min = min(critical_values, default=0.0 if critical_names else 1.0)
+            required_avg = (
+                sum(required_values) / len(required_values)
+                if required_values else (0.0 if required_names else 1.0)
             )
+            evaluated_business = [check for check in business if not check.skipped]
+            business_score = (
+                sum(1.0 if check.passed else (0.0 if check.severity == SEVERITY_ERROR else 0.4)
+                    for check in evaluated_business) / len(evaluated_business)
+                if evaluated_business else None
+            )
+            table_quality = calculate_table_score(table, template.get("table"))
+            doc_score = document_score(
+                critical_min=critical_min,
+                required_avg=required_avg,
+                table_score=table_quality,
+                business_score=business_score,
+                identify_score=ident_conf / 100.0,
+            )
+            parse_conf = round(
+                100 * sum(score.score for score in field_scores.values()) / len(field_scores)
+            ) if field_scores else 0
             validation_conf = validation_confidence(
                 business_failures=len(business_errors),
                 business_warnings=len(business_warnings),
                 structure_issues=structure_issues,
                 cross_mismatch=len(mismatches),
             )
-            overall_conf = overall_confidence(ident_conf, parse_conf, validation_conf)
+            overall_conf = round(doc_score * 100)
 
             # ⑫ 状态机
-            status = determine_status(
-                critical_failed=critical_failed,
-                business_errors=len(business_errors) + len(business_rule_errors),
-                identify_mode=match_kind,
-                cross_mismatch=len(mismatches),
-                structure_issues=structure_issues,
-                business_warnings=len(business_warnings),
-                required_failed=required_failed,
-                parse_confidence=parse_conf,
+            quality_status = determine_quality_status(
+                critical_invalid=bool(critical_failed or business_errors or business_rule_errors),
+                critical_min=critical_min,
+                required_low=bool(required_failed) or any(
+                    field_scores[name].score < FIELD_MEDIUM
+                    for name in required_names if name in field_scores
+                ),
+                document_score=doc_score,
+                identify_weak=match_kind not in (IDENTIFY_MATCH, IDENTIFY_MANUAL),
+                has_flags=bool(mismatches or structure_issues or business_warnings or report.rescued_fields),
+            )
+            review_status = determine_review_status(quality_status)
+            status = legacy_status(
+                processing_status=PROCESSING_COMPLETED,
+                quality_status=quality_status,
+                review_status=review_status,
             )
             doc.status = status
+            doc.processing_status = PROCESSING_COMPLETED
+            doc.quality_status = quality_status
+            doc.review_status = review_status
+            doc.document_score = doc_score
             doc.identify_confidence = ident_conf
             doc.parse_confidence = parse_conf
             doc.overall_confidence = overall_conf
@@ -608,6 +722,22 @@ class PdfService:
                 ProcessOutcome(status=status, errors=errors, warnings=warnings).reasons
             )
             doc.error_reason = reason_text or None
+
+            for name, result in report.fields.items():
+                scored = field_scores.get(name, FieldScore(name, 0.0))
+                session.add(
+                    ExtractedField(
+                        document_id=doc.id,
+                        field_name=name,
+                        raw_value=result.raw_value,
+                        normalized_value=result.normalized_value,
+                        parser=result.parser,
+                        confidence=scored.score,
+                        evidence_json=json.dumps(scored.as_dict(), ensure_ascii=False),
+                        fallback_used=bool(getattr(result, "fallback_used", False)),
+                        strategy=str(getattr(result, "strategy", "primary")),
+                    )
+                )
 
             # ⑬ 结构化审计（方案 §13）：识别 / 解析 / 校验三段，JSON 落库
             audit_payload = {
@@ -656,6 +786,18 @@ class PdfService:
                 "parse_confidence": parse_conf,
                 "validation_confidence": validation_conf,
                 "overall_confidence": overall_conf,
+                "field_scores": {name: score.as_dict() for name, score in field_scores.items()},
+                "candidates": {
+                    name: [candidate.as_dict() for candidate in values]
+                    for name, values in candidates.items()
+                },
+                "document_score": round(doc_score, 4),
+                "states": {
+                    "processing_status": doc.processing_status,
+                    "quality_status": doc.quality_status,
+                    "review_status": doc.review_status,
+                    "legacy_status": doc.status,
+                },
             }
             session.add(
                 AuditLog(

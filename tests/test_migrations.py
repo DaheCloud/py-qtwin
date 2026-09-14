@@ -140,6 +140,9 @@ class TestLegacyUpgrade:
             doc = session.scalars(select(Document)).one()
             assert doc.file_name == "old.pdf"
             assert doc.status == "success"
+            assert doc.processing_status == "completed"
+            assert doc.quality_status == "valid"
+            assert doc.review_status == "not_required"
             assert doc.template_version is None  # 历史行留空，不是报错
             assert doc.error_reason is None
             assert doc.items == []
@@ -268,7 +271,7 @@ class TestReport:
         db = _make_legacy_db(tmp_path / "app.db")
         report = init_db(get_engine(db))
         summary = report.summary()
-        assert "结构版本 v0 → v2" in summary
+        assert f"结构版本 v0 → v{SCHEMA_VERSION}" in summary
         assert "extracted_items" in summary
         assert "app.db.bak-v0" in summary
         assert report.migrated is True

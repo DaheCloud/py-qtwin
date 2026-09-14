@@ -29,6 +29,9 @@ class ParseReport:
     table: Any | None = None
     # 由表格结果回填的字段名（审计用）
     table_applied: list[str] = field(default_factory=list)
+    # 被表格/动态兜底替换的原结果，供 V2 候选排序与审计保留。
+    table_replaced: dict[str, FieldResult] = field(default_factory=dict)
+    fallback_replaced: dict[str, FieldResult] = field(default_factory=dict)
 
     @property
     def valid(self) -> bool:
@@ -49,7 +52,7 @@ class FixedRegionParser:
     """按模板 JSON 的 page/rect 用 PyMuPDF 提取字段。
 
     模板约定（见 fixed_pdf_exe_tech_stack.md 第 4/23 节）：
-      mode 缺省 = fixed；dynamic_fallback 缺省 = true。
+      mode 缺省 = fixed；dynamic_fallback 缺省 = false（字段级显式 opt-in）。
     """
 
     _NORMALIZERS: dict[str, Any] = {
@@ -73,6 +76,11 @@ class FixedRegionParser:
                     report.fields[name] = result
                     continue
 
+                if "rect" not in spec:
+                    result = FieldResult(name, "", page=page_no)
+                    result.fail("固定规则缺少 rect 配置")
+                    report.fields[name] = result
+                    continue
                 page = doc[page_no]
                 rect = pymupdf.Rect(*spec["rect"])
                 raw = page.get_textbox(rect).strip()
@@ -84,6 +92,9 @@ class FixedRegionParser:
                     field_name=name,
                     raw_value=raw,
                     normalized_value=normalized,
+                    parser="pymupdf",
+                    page=page_no,
+                    rect=tuple(float(v) for v in spec["rect"]),
                 )
                 report.fields[name] = validate_field(result, spec)
         report.apply_business_rules(template.get("business_rules"))

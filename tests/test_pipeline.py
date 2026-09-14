@@ -87,6 +87,10 @@ def test_service_persists_in_transaction(tmp_path, monkeypatch, contract_engine)
     with factory() as session:
         doc = service.process_document(session, str(pdf_path))
         assert doc.status == "success"
+        assert doc.processing_status == "completed"
+        assert doc.quality_status == "valid"
+        assert doc.review_status == "not_required"
+        assert doc.document_score is not None and doc.document_score >= 0.90
         assert {f.field_name: f.normalized_value for f in doc.fields} == {
             "contract_no": "HT20260901",
             "customer_name": "ABC有限公司",
@@ -94,6 +98,7 @@ def test_service_persists_in_transaction(tmp_path, monkeypatch, contract_engine)
             "sign_date": "2026-09-01",
         }
         assert all(v.matched for v in doc.verifications)
+        assert all(f.confidence is not None and f.evidence_json for f in doc.fields)
 
         # 去重：同一 hash 再次导入应抛错
         import pytest

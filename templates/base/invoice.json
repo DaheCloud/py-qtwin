@@ -1,5 +1,8 @@
 {
   "schema": "invoice",
+  "dynamic_fallback": false,
+  "fallback_policy": "none",
+  "region_failure_policy": "fail",
   "_comment": "发票 Base Schema（方案 §16）：定义『有哪些字段』（类型/严重程度）与各版式共用的 regions/table/结构/业务校验配置。版式模板（templates/*.json）用 extends: invoice 继承本文件，只声明『怎么找』；Variant 在模板里定义『哪些字段必须有』。字段合并规则：模板字段深覆盖 base 字段（模板只写定位键时继承类型/正则/严重程度）。",
   "regions": {
     "header": {
@@ -106,11 +109,16 @@
     "invoice_no": {
       "type": "string",
       "critical": true,
+      "fallback_policy": "none",
+      "region_failure_policy": "fail",
+      "area": "top_right",
       "pattern": "^\\d{8,20}$"
     },
     "invoice_date": {
       "type": "date",
-      "critical": true
+      "critical": true,
+      "fallback_policy": "none",
+      "region_failure_policy": "fail"
     },
     "buyer_name": {
       "type": "string",
@@ -174,16 +182,22 @@
     "amount": {
       "type": "decimal",
       "critical": true,
+      "fallback_policy": "none",
+      "region_failure_policy": "fail",
       "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
     },
     "tax_amount": {
       "type": "decimal",
       "critical": true,
+      "fallback_policy": "none",
+      "region_failure_policy": "fail",
       "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
     },
     "total_amount": {
       "type": "decimal",
       "critical": true,
+      "fallback_policy": "none",
+      "region_failure_policy": "fail",
       "pattern": "^[¥￥]?[\\d,]+\\.\\d{2}$"
     }
   }

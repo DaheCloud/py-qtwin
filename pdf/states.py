@@ -128,9 +128,19 @@ def legacy_status(
 
 def final_display_status(doc: Any) -> str:
     """详情/列表展示用的中文状态（方案 §10.2）。"""
-    processing = getattr(doc, "processing_status", None) or "completed"
-    quality = getattr(doc, "quality_status", None) or "unknown"
-    review = getattr(doc, "review_status", None) or REVIEW_NOT_REQUIRED
+    processing = getattr(doc, "processing_status", None)
+    quality = getattr(doc, "quality_status", None)
+    review = getattr(doc, "review_status", None)
+    if not processing or not quality or not review:
+        return {
+            "needs_ocr": "等待 OCR",
+            "failed": "解析失败",
+            "manual_review": "待复核",
+            "warning": "待复核",
+            "success": "准确",
+            "processing": "解析中",
+            "pending": "等待解析",
+        }.get(getattr(doc, "status", None), "状态未知")
 
     if processing == PROCESSING_NEEDS_OCR:
         return "等待 OCR"

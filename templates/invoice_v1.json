@@ -145,6 +145,7 @@
     },
     "construction_site": {
       "page": 0,
+      "fallback_policy": "document",
       "anchor": "建筑服务发生地",
       "direction": "below",
       "max_distance": 90,
@@ -154,6 +155,7 @@
     },
     "project_name": {
       "page": 0,
+      "fallback_policy": "document",
       "anchor": "建筑项目名称",
       "direction": "below",
       "max_distance": 90,
@@ -171,6 +173,7 @@
     },
     "total_amount": {
       "page": 0,
+      "region": "totals",
       "anchor": ["（小写）", "(小写)"],
       "direction": "right",
       "verify": true

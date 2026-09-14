@@ -83,10 +83,13 @@ def fuse(items: Iterable[EvidenceItem]) -> tuple[float, dict[str, float], list[s
 
     返回 (score, {维度: 分数}, [不适用维度说明])。
     """
-    applicable = [(item.name, float(item.score)) for item in items if item.applies]
-    notes = [f"{item.name} 不适用（{item.detail}）" for item in items if not item.applies]
+    materialized = list(items)
+    # 每个维度只保留一条，避免分数计算重复加权而展示字典只显示最后一条。
+    by_name = {item.name: item for item in materialized}
+    applicable = [(item.name, float(item.score)) for item in by_name.values() if item.applies]
+    notes = [f"{item.name} 不适用（{item.detail}）" for item in by_name.values() if not item.applies]
     if not applicable:
-        return 1.0, {}, notes  # 无任何证据可比：不给低分（按"未知"处理，由上层决策）
+        return 0.5, {}, notes + ["没有可用证据"]
 
     total_weight = 0.0
     weighted = 0.0
@@ -97,7 +100,7 @@ def fuse(items: Iterable[EvidenceItem]) -> tuple[float, dict[str, float], list[s
         total_weight += weight
         weighted += weight * score
     if total_weight <= 0:
-        return 1.0, {}, notes
+        return 0.5, {}, notes + ["没有已配置权重的证据"]
     return weighted / total_weight, {name: score for name, score in applicable}, notes
 
 

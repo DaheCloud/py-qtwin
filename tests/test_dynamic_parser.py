@@ -615,9 +615,8 @@ class TestCrossPageFieldExtraction:
     }
     TEMPLATE = {"regions": {"totals": {"start_anchor": ["合 计", "合计"]}}}
 
-    def test_single_page_region_unresolved_falls_back(self):
-        """单页且 region 标签缺失（页面没有任何"合计"字样）→ 退回未约束提取，
-        不能直接失败（画布兜底不能只在多页时才生效）。"""
+    def test_single_page_region_unresolved_fails_by_default(self):
+        """V2 默认拒绝在 Region 缺失时扩大到全页，避免静默取到明细金额。"""
         words = [
             _Word(60, 251, 96, 260, "金额"),      # 表头锚点
             _Word(60, 273, 96, 282, "73933.20"),  # 同列明细值（金额列 x 与表头一致）
@@ -631,8 +630,23 @@ class TestCrossPageFieldExtraction:
             total_pages=1,
         )
 
-        assert result.valid, result.errors
-        assert result.normalized_value == "73933.20"
+        assert not result.valid
+        assert "region_failure_policy=fail" in result.errors[0]
+
+    def test_single_page_region_page_fallback_is_explicit(self):
+        words = [
+            _Word(60, 251, 96, 260, "金额"),
+            _Word(60, 273, 96, 282, "73933.20"),
+        ]
+        result = extract_field_cross_page(
+            "amount",
+            {**self.SPEC, "region_failure_policy": "page"},
+            self.TEMPLATE,
+            page_words_fn=lambda p: words,
+            total_pages=1,
+        )
+        assert result.valid and result.normalized_value == "73933.20"
+        assert result.fallback_used and result.region_fallback == "page"
 
     def test_canvas_distance_bonus_reaches_totals_far_on_second_page(self):
         """锚点在第 1 页表头、合计行在第 2 页中下部：画布上垂直距离 ≈1170pt，

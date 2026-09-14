@@ -24,14 +24,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.document import AuditLog, Document
+from pdf.states import REVIEW_CONFIRMED, legacy_status
 
 # 可被人工确认的状态（V1 词表，兼容旧库/旧调用）
 SUSPECT_STATUSES: tuple[str, ...] = ("manual_review", "warning")
 
 # V2 复核状态（方案 §9）
 REVIEW_PENDING = "pending"
-REVIEW_CONFIRMED = "confirmed"
-
 STATUS_SUCCESS = "success"
 
 
@@ -117,10 +116,18 @@ def confirm_document(session: Session, doc: Document, *, source: str = "manual")
     返回本次标记为已确认的校验记录条数（已确认的不重复计数）。
     不提交事务，由调用方提交。
     """
-    doc.status = STATUS_SUCCESS
-    if getattr(doc, "review_status", None) is not None:
-        doc.review_status = REVIEW_CONFIRMED
-    doc.error_reason = None
+    # ORM 新增列的默认值会让“仅写旧 status 的历史/测试记录”看起来像尚未处理；
+    # 在确认入口按旧状态补成等价三维状态，再只修改 review_status。
+    if doc.processing_status == "pending" and doc.status in SUSPECT_STATUSES:
+        doc.processing_status = "completed"
+    if doc.quality_status == "unknown" and doc.status in SUSPECT_STATUSES:
+        doc.quality_status = "warning"
+    doc.review_status = REVIEW_CONFIRMED
+    doc.status = legacy_status(
+        processing_status=doc.processing_status,
+        quality_status=doc.quality_status,
+        review_status=doc.review_status,
+    )
 
     now = datetime.now(timezone.utc)
     marked = 0
@@ -136,7 +143,10 @@ def confirm_document(session: Session, doc: Document, *, source: str = "manual")
         AuditLog(
             document_id=doc.id,
             action="manual_confirm",
-            detail=f"status={STATUS_SUCCESS} source={source} fields={marked}",
+            detail=(
+                f"status={doc.status} source={source} fields={marked} "
+                f"quality_status={doc.quality_status} review_status={doc.review_status}"
+            ),
         )
     )
     return marked

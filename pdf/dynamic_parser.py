@@ -20,9 +20,11 @@ import pymupdf
 
 from pdf.normalizers import normalize_amount, normalize_date, normalize_text
 from pdf.policies import (
+    FALLBACK_DOCUMENT,
     REGION_DOCUMENT,
     REGION_FAIL,
     REGION_PAGE,
+    field_fallback_policy,
     field_region_policy,
 )
 from pdf.pymupdf_parser import ParseReport
@@ -567,13 +569,23 @@ def extract_field_cross_page(
     4. 未配置 region 的字段保持原行为：单页失败后走画布兜底。
     """
     page_no = int(spec.get("page", 0))
-    order = field_page_order(page_no, total_pages)
-    if not order:
+    fallback_policy = field_fallback_policy(template, spec)
+    region_policy = field_region_policy(template, spec)
+    # 带 Region 时允许跨页寻找同一个受约束区域，这不是扩大搜索范围；
+    # 无 Region 的全文跨页搜索必须显式 opt-in。旧 dynamic_fallback=true
+    # 仅为已存在模板保留跨页行为，生产 V2 模板默认 false。
+    allow_document = (
+        bool(spec.get("region"))
+        or fallback_policy == FALLBACK_DOCUMENT
+        or bool(template.get("dynamic_fallback", False))
+    )
+    order = field_page_order(page_no, total_pages) if allow_document else [page_no]
+    if page_no < 0 or page_no >= total_pages or not order:
         result = FieldResult(name, "", parser=parser_name)
         result.fail(f"页码 {page_no} 超出文档范围（共 {total_pages} 页）")
         return result
 
-    policy = field_region_policy(template, spec)
+    policy = region_policy
     region_name = spec.get("region")
 
     first_result: FieldResult | None = None
@@ -615,6 +627,8 @@ def extract_field_cross_page(
         if p == page_no:
             first_result = result
         if result.valid and result.normalized_value:
+            if p != page_no and not region_name:
+                result.fallback_used = True
             return result
 
     if region_name and not region_resolved:
@@ -643,6 +657,7 @@ def extract_field_cross_page(
                 page=page_no,
             )
             result.region_fallback = REGION_PAGE
+            result.fallback_used = True
             return result
         # REGION_DOCUMENT：继续走到下方画布兜底（跨页）
 
@@ -691,6 +706,7 @@ def extract_field_cross_page(
             canvas_result.region_fallback = (
                 REGION_DOCUMENT if len(order) > 1 else REGION_PAGE
             )
+            canvas_result.fallback_used = True
         return canvas_result
 
     if first_result is not None:
