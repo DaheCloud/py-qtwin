@@ -190,6 +190,7 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
         if w.y0 >= header.bottom - _EPS and (stop_y is None or w.y0 < stop_y - _EPS)
     ]
     rows = group_rows(region, tolerance=_row_tolerance(words, config))
+    rows = _split_overlapping_rows(rows, columns, config)
     result.physical_rows = len(rows)
 
     # V2（方案 §8.2）：用前几行真实数据微调列边界（表头中心点只是初值）
@@ -201,6 +202,7 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
     items, trailing = _build_items(
         rows, columns, suffix_continuation=bool(config.get("suffix_continuation", True))
     )
+    _record_item_ambiguities(result, items)
     result.items = items
     if not items:
         result.issues.append("table_no_rows")
@@ -247,6 +249,7 @@ def extract_table_multipage(
         stop_y = find_stop_y(words, config.get("stop_anchor"), after_y=0.0)
         region = [w for w in words if stop_y is None or w.y0 < stop_y - _EPS]
         rows = group_rows(region, tolerance=_row_tolerance(words, config))
+        rows = _split_overlapping_rows(rows, result.columns, config)
 
         # 后续页的噪声行：重复表头行（表头底部作为区域起点，其上方的页眉
         # 一并排除）、页脚行。不做这层过滤时，表头文字会因"短文本即数据"
@@ -267,6 +270,7 @@ def extract_table_multipage(
         new_items, trailing = _build_items(
             kept, result.columns, suffix_continuation=suffix, index_offset=len(result.items)
         )
+        _record_item_ambiguities(result, new_items)
         if trailing and "table_trailing_rows" not in result.issues:
             result.issues.append("table_trailing_rows")
         if new_items:
@@ -614,6 +618,58 @@ def _row_tolerance(words: list[Word], config: dict[str, Any]) -> float:
     return max(base, float(configured))
 
 
+def _split_overlapping_rows(
+    rows: list[list[Word]],
+    columns: dict[str, TableColumn],
+    config: dict[str, Any],
+) -> list[list[Word]]:
+    """将被宽松初始容差误合并的两条数据行按 y 层重新拆开。
+
+    只在至少两个非文本列均出现多个 y 层的完整标量值时触发。单行金额被切成
+    ``73933.`` + ``20``、或仅一个单元格重复，不足以触发拆行，避免过度修正。
+    """
+    refined: list[list[Word]] = []
+    configured = config.get("row_split_tolerance")
+    for row in rows:
+        heights = sorted(w.height for w in row if w.height > 0)
+        median_height = heights[len(heights) // 2] if heights else 1.0
+        split_tolerance = (
+            max(0.5, float(configured))
+            if configured is not None
+            else max(0.75, median_height * 0.15)
+        )
+
+        scalar_words: dict[str, list[Word]] = {}
+        for word in row:
+            key = _column_key_at(columns, word.cx)
+            if key is not None and columns[key].type != "string":
+                scalar_words.setdefault(key, []).append(word)
+
+        repeated_columns = 0
+        for key, words in scalar_words.items():
+            layers = group_rows(words, tolerance=split_tolerance)
+            complete_layers = sum(
+                _complete_scalar_value(layer, columns[key].type) for layer in layers
+            )
+            if complete_layers >= 2:
+                repeated_columns += 1
+
+        split = group_rows(row, tolerance=split_tolerance)
+        if repeated_columns >= 2 and len(split) >= 2:
+            refined.extend(split)
+        else:
+            refined.append(row)
+    return refined
+
+
+def _complete_scalar_value(words: list[Word], column_type: str) -> bool:
+    """一个 y 层是否构成完整数值；小数碎片末尾 ``.`` 不算完整。"""
+    text = clean_value_text("".join(w.text for w in sorted(words, key=lambda w: w.x0))).strip()
+    if column_type == "rate":
+        return bool(re.fullmatch(r"\d+(?:\.\d+)?%", text))
+    return bool(re.fullmatch(r"[¥￥]?[+-]?\d[\d,]*(?:\.\d+)?", text))
+
+
 # ---------------------------------------------------------------- 物理行 → 逻辑行
 
 
@@ -639,6 +695,7 @@ def _build_items(
     """
     items: list[dict[str, Any]] = []
     pending: dict[str, list[Word]] = {}
+    noise: dict[str, list[Word]] = {}
     for row in rows:
         cells: dict[str, list[Word]] = {key: [] for key in columns}
         for word in row:
@@ -652,7 +709,10 @@ def _build_items(
         if not _has_data(cells, columns):
             for key, words in cells.items():
                 if words:
-                    pending.setdefault(key, []).extend(words)
+                    # 跨行延续只适用于名称/规格/单位等文本。税率、金额等数值
+                    # 带入下一行会形成 20%20% / 100.00100.00 这类静默拼接。
+                    target = pending if columns[key].type == "string" else noise
+                    target.setdefault(key, []).extend(words)
             continue
         merged = {key: pending.get(key, []) + cells.get(key, []) for key in columns}
         pending = {}
@@ -675,16 +735,40 @@ def _build_items(
                 for key, words in pending.items()
                 if words and columns[key].type != "string"
             }
-    return items, pending
+    trailing = {key: list(words) for key, words in noise.items()}
+    for key, words in pending.items():
+        trailing.setdefault(key, []).extend(words)
+    return items, trailing
 
 
 def _build_item(
     cells: dict[str, list[Word]], columns: dict[str, TableColumn], *, index: int
 ) -> dict[str, Any]:
     item: dict[str, Any] = {"row_index": index}
+    ambiguous: list[str] = []
     for key, col in columns.items():
-        item[key] = _cell_value(cells.get(key) or [], col)
+        words = cells.get(key) or []
+        if col.type == "rate" and _rate_is_ambiguous(words):
+            item[key] = None
+            ambiguous.append(key)
+        else:
+            item[key] = _cell_value(words, col)
+    if ambiguous:
+        item["_ambiguous_columns"] = ambiguous
     return item
+
+
+def _rate_is_ambiguous(words: list[Word]) -> bool:
+    """同一物理单元格出现两个完整税率时拒绝拼接，数字与 % 分词仍允许。"""
+    raw = "".join(w.text.strip() for w in sorted(words, key=lambda w: (w.y0, w.x0)))
+    return len(re.findall(r"\d+(?:\.\d+)?%", raw)) > 1
+
+
+def _record_item_ambiguities(result: TableResult, items: list[dict[str, Any]]) -> None:
+    """把内部歧义标记提升为表格问题，避免隐藏键进入持久化与审计 items。"""
+    for item in items:
+        for key in item.pop("_ambiguous_columns", []):
+            result.issues.append(f"table_cell_ambiguous:{item.get('row_index')}:{key}")
 
 
 def _has_data(cells: dict[str, list[Word]], columns: dict[str, TableColumn]) -> bool:

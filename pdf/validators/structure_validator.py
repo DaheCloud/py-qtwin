@@ -95,6 +95,18 @@ def _validate_table_structure(
     elif required_columns:
         results.append(CheckResult("table_columns", True, "必需列齐全"))
 
+    ambiguous = [issue for issue in table.issues if issue.startswith("table_cell_ambiguous:")]
+    if ambiguous:
+        cells = [issue.removeprefix("table_cell_ambiguous:") for issue in ambiguous]
+        results.append(
+            CheckResult(
+                "table_cell_ambiguity",
+                False,
+                "明细单元格存在多个候选值：" + "、".join(cells),
+                severity=SEVERITY_WARNING,
+            )
+        )
+
     # 每条明细的关键单元格（模板 structure.item_table.required_cells）
     for key in config.get("required_cells") or []:
         missing_rows = [str(item.get("row_index")) for item in items if not item.get(key)]

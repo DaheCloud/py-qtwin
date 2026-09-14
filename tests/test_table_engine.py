@@ -158,6 +158,22 @@ class TestLogicalRows:
         assert [item["amount"] for item in result.items] == ["100.00", "200.00", "300.00"]
         assert [item["row_index"] for item in result.items] == [1, 2, 3]
 
+    def test_close_rows_are_split_by_repeated_numeric_y_layers(self):
+        """两行 y0 差小于初始容差时，多个数值列的 y 层可将其恢复为两行。"""
+        words = [
+            *_header(),
+            *_data_row(273, name="*服务*甲", amount="100.00", rate="20%"),
+            *_data_row(276, name="*服务*乙", amount="200.00", rate="13%"),
+            *_totals_row(360),
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert len(result.items) == 2
+        assert [item["name"] for item in result.items] == ["*服务*甲", "*服务*乙"]
+        assert [item["tax_rate"] for item in result.items] == ["20%", "13%"]
+        assert "20%13%" not in json.dumps(result.items, ensure_ascii=False)
+
     def test_wrapped_name_merged_into_next_data_row(self):
         """名称折成两行（第二行才带数值）：合并为一条明细（方案 §13/§14）。"""
         words = [
@@ -196,6 +212,21 @@ class TestLogicalRows:
         result = extract_table(words, _table_config())
 
         assert [item["name"] for item in result.items] == ["前缀说明*服务*甲", "*服务*乙"]
+
+    def test_rate_only_continuation_is_not_carried_into_next_row(self):
+        """非数据行的税率不得与下一条明细拼成 20%20%。"""
+        words = [
+            *_header(),
+            _Word(420, 273, 440, 282, "20%"),
+            *_data_row(295, rate="20%"),
+            *_totals_row(360),
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert result.items[0]["tax_rate"] == "20%"
+        assert "20%20%" not in json.dumps(result.items, ensure_ascii=False)
+        assert "table_trailing_rows" in result.issues
 
     def test_info_block_rows_do_not_become_items(self):
         """表格下方信息块（长文本落进数值列）不构成明细行（行级合理性守卫）。"""
@@ -256,6 +287,25 @@ class TestCellsAndBounds:
         result = extract_table(words, config)
 
         assert result.items[0]["spec"] is None
+
+    def test_two_rates_in_merged_physical_row_are_ambiguous(self):
+        """两行距离过近被聚成一行时，税率置空并留下结构风险，而不是直接拼接。"""
+        words = [
+            *_header(),
+            *_data_row(273, rate="20%"),
+            _Word(420, 275, 440, 284, "20%"),
+            *_totals_row(360),
+        ]
+
+        result = extract_table(words, _table_config())
+
+        assert result.items[0]["tax_rate"] is None
+        assert "table_cell_ambiguous:1:tax_rate" in result.issues
+        checks = validate_structure(
+            _template(), _Report({}, items=result.items, table=result)
+        )
+        ambiguity = next(c for c in checks if c.rule == "table_cell_ambiguity")
+        assert ambiguity.failed
 
     def test_stop_takes_min_across_direct_and_merged_hits(self):
         """真票回归（发票1）：直匹配命中下方"价税合计（大写）"时，仍必须取上方
