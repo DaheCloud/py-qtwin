@@ -209,7 +209,7 @@ class DetailDialog(QDialog):
         self._btn_fit = self._tool_button("适应宽度", self._fit_pdf_width)
         for w in (self._btn_zoom_out, self._zoom_label, self._btn_zoom_in, self._btn_fit):
             zoom_bar.addWidget(w)
-        # 翻页：连续滚动（MultiPage）+ 页码/上下页按钮，多页发票可逐页核对
+        # 翻页：单页按需渲染，避免多页 PDF 打开时同步布局全部页面阻塞界面。
         self._btn_page_prev = self._tool_button(
             "上一页", lambda: self._pdf_view.pageNavigator().jumpToPreviousPage()
         )
@@ -228,8 +228,7 @@ class DetailDialog(QDialog):
         self._pdf_view = _ZoomablePdfView()
         self._pdf_view.setObjectName("PdfPreview")
         self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        # 连续多页显示：默认 SinglePage 只显示一页且无翻页控件，多页 PDF 看起来"只有一页"
-        self._pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
+        self._pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
         self._pdf_view.on_zoom = lambda f: self._zoom_label.setText(f"{int(f * 100)}%")
         self._pdf_document: QPdfDocument | None = None
         self._page_count = 0
