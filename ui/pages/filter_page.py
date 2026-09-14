@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -64,8 +65,8 @@ DATA_COLUMNS: list[tuple[str, str, str | None, int, bool]] = [
 COL_CHECK, COL_NAME = 0, 1
 COL_DATA_START = 2
 COL_STATUS = COL_DATA_START + len(DATA_COLUMNS)
-TOTAL_COLS = COL_STATUS + 1
-# 操作列作为右侧冻结面板（独立表格，不随主表横向滚动）
+COL_ACTION = COL_STATUS + 1
+TOTAL_COLS = COL_ACTION + 1
 ACTION_COL_WIDTH = 190
 
 _KEY_HIDDEN_COLS = "filter/hidden_columns"
@@ -217,12 +218,17 @@ class FilterPage(QWidget):
 
         self._table = QTableWidget(0, TOTAL_COLS)
         self._table.setHorizontalHeaderLabels(
-            ["", "文件名", *[c[0] for c in DATA_COLUMNS], "状态"]
+            ["", "文件名", *[c[0] for c in DATA_COLUMNS], "状态", "操作"]
         )
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(48)  # 与上传页行高统一
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_row_menu)
+        self._table.cellDoubleClicked.connect(
+            lambda row, _column: self._view_row(row)
+        )
         header = self._table.horizontalHeader()
         header.setMinimumSectionSize(40)
         header.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.Fixed)
@@ -237,30 +243,8 @@ class FilterPage(QWidget):
             self._table.setColumnWidth(col, width)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Interactive)
         self._table.setColumnWidth(COL_STATUS, 100)
-
-        # 操作列：右侧冻结面板，主表横向滚动时保持可见
-        self._action_table = QTableWidget(0, 1)
-        self._action_table.setHorizontalHeaderLabels(["操作"])
-        self._action_table.setObjectName("ActionTable")
-        self._action_table.verticalHeader().setVisible(False)
-        self._action_table.verticalHeader().setDefaultSectionSize(48)
-        self._action_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._action_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._action_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._action_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._action_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._action_table.setColumnWidth(0, ACTION_COL_WIDTH)
-        # 固定面板总宽 = 列宽，否则布局会把表格拉宽、列右侧多出一片空白
-        self._action_table.setFixedWidth(ACTION_COL_WIDTH)
-        action_header = self._action_table.horizontalHeader()
-        action_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        # 主表垂直滚动 → 冻结面板同步；主表选行 → 面板高亮同步
-        self._table.verticalScrollBar().valueChanged.connect(
-            self._action_table.verticalScrollBar().setValue
-        )
-        self._table.currentCellChanged.connect(
-            lambda cr, _cc, _pr, _pc: self._action_table.selectRow(cr) if cr >= 0 else None
-        )
+        header.setSectionResizeMode(COL_ACTION, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(COL_ACTION, ACTION_COL_WIDTH)
 
         self._copy_delegate = CopyCellDelegate(self._table)
         self._copy_delegate.cell_copied.connect(lambda t: self._toast.show_message(f"已复制：{t}"))
@@ -268,13 +252,7 @@ class FilterPage(QWidget):
             self._table.setItemDelegateForColumn(col, self._copy_delegate)
         self._table.setItemDelegateForColumn(COL_STATUS, BadgeDelegate(self._table))
 
-        table_area = QWidget()
-        table_area_l = QHBoxLayout(table_area)
-        table_area_l.setContentsMargins(0, 0, 0, 0)
-        table_area_l.setSpacing(0)
-        table_area_l.addWidget(self._table, 1)
-        table_area_l.addWidget(self._action_table)
-        card_l.addWidget(table_area, 1)
+        card_l.addWidget(self._table, 1)
         root.addWidget(card, 1)
 
         # ---- 表头全选框（叠加在勾选列表头中央，自绘样式）
@@ -343,7 +321,6 @@ class FilterPage(QWidget):
             rows.append((doc_id, file_name, fields))
 
         self._table.setRowCount(0)
-        self._action_table.setRowCount(0)
         for doc_id, file_name, fields in rows:
             self._append_row(doc_id, file_name, fields)
         if self._auto_fit_enabled():
@@ -399,9 +376,7 @@ class FilterPage(QWidget):
         status_item = QTableWidgetItem(_status_text("success"))
         self._table.setItem(r, COL_STATUS, status_item)
 
-        # 操作按钮写入右侧冻结面板（与主表行号一一对应）
-        ar = self._action_table.rowCount()
-        self._action_table.insertRow(ar)
+        # 操作按钮与数据处于同一主表行，不再依赖双表同步。
         actions = QWidget()
         a_l = QHBoxLayout(actions)
         a_l.setContentsMargins(4, 2, 4, 2)
@@ -418,9 +393,8 @@ class FilterPage(QWidget):
             # handler/r 均通过默认参数绑定，避免闭包共享循环变量导致全部执行删除
             btn.clicked.connect(lambda _=False, rr=r, h=handler: h(rr))
             a_l.addWidget(btn)
-        self._action_table.setCellWidget(ar, 0, actions)
+        self._table.setCellWidget(r, COL_ACTION, actions)
         actions.setFixedHeight(36)
-        actions.move(actions.x(), max(0, (self._action_table.rowHeight(ar) - 36) // 2))
         self._refresh_row_status(r)
 
     def _refresh_row_status(self, row: int) -> None:
@@ -446,6 +420,24 @@ class FilterPage(QWidget):
         status_item.setData(Qt.ItemDataRole.UserRole, kind)
 
     # ------------------------------------------------------------- 行为
+
+    def _row_menu(self, row: int) -> QMenu:
+        """构造当前行的右键菜单；操作与行号在创建时绑定。"""
+        menu = QMenu(self)
+        menu.addAction("查看详情", lambda: self._view_row(row))
+        menu.addAction("复制整行", lambda: self._copy_row(row))
+        menu.addSeparator()
+        menu.addAction("删除", lambda: self._delete_row(row))
+        return menu
+
+    def _show_row_menu(self, pos) -> None:
+        """在鼠标所在行显示查看、复制、删除菜单。"""
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        self._table.selectRow(row)
+        self._row_menu(row).exec(self._table.viewport().mapToGlobal(pos))
 
     def _position_select_all(self) -> None:
         """把全选框定位到勾选列表头的中央（随横向滚动移动）。"""
@@ -825,6 +817,5 @@ class FilterPage(QWidget):
                 session.add(AuditLog(action="delete_document", detail=f"id={doc_id} name={name}"))
                 session.commit()
         self._table.removeRow(row)
-        self._action_table.removeRow(row)
-        self._update_select_count()
+        self.reload()  # 重建按钮/右键菜单的行绑定，避免删除后剩余行号错位
         self._toast.show_message("已删除")

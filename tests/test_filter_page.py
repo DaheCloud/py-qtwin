@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ui.pages.filter_page import COL_CHECK, COL_NAME, record_month, year_month
+from ui.pages.filter_page import COL_ACTION, COL_CHECK, COL_NAME, record_month, year_month
 
 
 def test_year_month_parses_common_formats():
@@ -120,6 +120,33 @@ def test_one_click_confirm_button_removed(confirm_page):
 
     assert not hasattr(page, "_confirm_btn")
     assert all("一键确认" not in button.text() for button in page.findChildren(QPushButton))
+
+
+def test_action_column_is_part_of_main_table(confirm_page):
+    page, _ = confirm_page
+
+    assert not hasattr(page, "_action_table")
+    assert page._table.horizontalHeaderItem(COL_ACTION).text() == "操作"
+    assert page._table.cellWidget(0, COL_ACTION) is not None
+
+
+def test_double_click_any_cell_opens_row_detail(confirm_page):
+    page, _ = confirm_page
+    row = _row_of(page, "review.pdf")
+    emitted = []
+    page.detail_requested.connect(lambda doc_id, name: emitted.append((doc_id, name)))
+
+    page._table.cellDoubleClicked.emit(row, COL_NAME)
+
+    assert emitted and emitted[0][1] == "review.pdf"
+
+
+def test_row_context_menu_contains_actions(confirm_page):
+    page, _ = confirm_page
+
+    texts = [action.text() for action in page._row_menu(0).actions() if not action.isSeparator()]
+
+    assert texts == ["查看详情", "复制整行", "删除"]
 
 
 def test_export_includes_success_and_suspect_but_skips_failed(

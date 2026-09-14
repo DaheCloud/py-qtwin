@@ -284,6 +284,33 @@ QLabel, QCheckBox, QRadioButton {{
     border-bottom: 1px solid {t['BORDER']};
 }}
 
+/* ================ 右键菜单 ================ */
+QMenu {{
+    background: {t['BG_CARD']};
+    color: {t['TEXT_PRIMARY']};
+    border: 1px solid {t['BORDER']};
+    border-radius: 8px;
+    padding: 6px;
+}}
+QMenu::item {{
+    min-width: 112px;
+    padding: 8px 28px 8px 12px;
+    margin: 1px 0;
+    border-radius: 5px;
+}}
+QMenu::item:selected {{
+    background: {t['ACCENT_SOFT']};
+    color: {t['ACCENT']};
+}}
+QMenu::item:disabled {{
+    color: {t['DISABLED_TEXT']};
+}}
+QMenu::separator {{
+    height: 1px;
+    margin: 5px 8px;
+    background: {t['BORDER']};
+}}
+
 /* ================ 按钮 ================ */
 QPushButton {{
     border-radius: 6px;
