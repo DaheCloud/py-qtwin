@@ -114,12 +114,41 @@ def empty_page(qt_app, tmp_path):
     return _make_page(db_path), db_path
 
 
-def test_one_click_confirm_button_removed(confirm_page):
+def test_one_click_confirm_button_available(confirm_page):
     page, _ = confirm_page
-    from PySide6.QtWidgets import QPushButton
 
-    assert not hasattr(page, "_confirm_btn")
-    assert all("一键确认" not in button.text() for button in page.findChildren(QPushButton))
+    assert page._confirm_btn.text() == "✓ 一键确认无误"
+
+
+def test_one_click_confirm_only_confirms_selected_suspect_rows(confirm_page, monkeypatch):
+    page, db_path = confirm_page
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Yes),
+    )
+    _select_all(page)
+
+    page._confirm_selected()
+
+    from sqlalchemy import select
+
+    from database.db import get_engine, make_session_factory
+    from models.document import Document
+
+    with make_session_factory(get_engine(db_path))() as session:
+        statuses = {
+            doc.file_name: doc.status for doc in session.scalars(select(Document))
+        }
+    assert statuses == {
+        "review.pdf": "success",
+        "warning.pdf": "success",
+        "success.pdf": "success",
+        "failed.pdf": "failed",
+    }
+    assert "已确认 2 条" in page._toast.text()
 
 
 def test_action_column_is_part_of_main_table(confirm_page):
@@ -147,6 +176,20 @@ def test_row_context_menu_contains_actions(confirm_page):
     texts = [action.text() for action in page._row_menu(0).actions() if not action.isSeparator()]
 
     assert texts == ["查看详情", "复制整行", "删除"]
+
+
+def test_failed_status_filter_only_shows_failed_documents(confirm_page):
+    page, _ = confirm_page
+
+    index = page._status_filter.findData("failed")
+    assert index >= 0
+    assert page._status_filter.itemText(index) == "失败"
+
+    page._status_filter.setCurrentIndex(index)
+    page.reload()
+
+    assert page._table.rowCount() == 1
+    assert page._table.item(0, COL_NAME).text() == "failed.pdf"
 
 
 def test_export_includes_success_and_suspect_but_skips_failed(

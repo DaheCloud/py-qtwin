@@ -167,6 +167,7 @@ class FilterPage(QWidget):
         self._status_filter.addItem("全部识别状态", "")
         self._status_filter.addItem("准确", "success")
         self._status_filter.addItem("可疑/待校验", "review")
+        self._status_filter.addItem("失败", "failed")
         bar_l.addWidget(self._status_filter)
 
         # 开票年月过滤：选项在 reload 时按库内数据动态统计（只到年月）
@@ -195,6 +196,13 @@ class FilterPage(QWidget):
         export_btn.setProperty("cssClass", "btn-success")
         export_btn.clicked.connect(self._export_selected)
         head.addWidget(export_btn)
+
+        self._confirm_btn = QPushButton("✓ 一键确认无误")
+        self._confirm_btn.setProperty("cssClass", "btn-success")
+        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._confirm_btn.setToolTip("将勾选的可疑/待校验记录批量确认并标记为准确")
+        self._confirm_btn.clicked.connect(self._confirm_selected)
+        head.addWidget(self._confirm_btn)
 
         delete_btn = QPushButton("🗑 批量删除选中项")
         delete_btn.setProperty("cssClass", "btn-danger")
@@ -745,6 +753,49 @@ class FilterPage(QWidget):
         skipped = f"，跳过 {skipped_n} 条不可导出记录" if skipped_n else ""
         self._toast.show_message(
             f"已导出 {len(export_ids)} 条数据（准确 {success_n} 条，可疑 {suspect_n} 条）{skipped}"
+        )
+
+    def _confirm_selected(self) -> None:
+        """批量确认勾选的可疑记录，其余状态安全跳过。"""
+        ids = self._selected_doc_ids()
+        if not ids:
+            self._toast.show_message("请先勾选要确认的行")
+            return
+
+        from database.db import get_engine, make_session_factory
+        from services.review_service import confirm_documents
+
+        factory = make_session_factory(get_engine(self._db_path))
+        with factory() as session:
+            preview = confirm_documents(
+                session, ids, source="filter_page", dry_run=True
+            )
+
+        if not preview.confirmed:
+            self._toast.show_message("勾选的数据中没有可确认的记录")
+            return
+
+        message = (
+            f"确认选中的 {preview.confirmed_count} 条可疑/待校验数据无误？\n"
+            "确认后将标记为准确，并记录审计日志。"
+        )
+        skipped = len(preview.skipped) + len(preview.missing)
+        if skipped:
+            message += f"\n另有 {skipped} 条记录不符合确认条件，将自动跳过。"
+        answer = QMessageBox.question(self, "一键确认无误", message)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        with factory() as session:
+            report = confirm_documents(
+                session, preview.confirmed, source="filter_page"
+            )
+            session.commit()
+
+        self._select_all_btn.setChecked(False)
+        self.reload()
+        self._toast.show_message(
+            f"已确认 {report.confirmed_count} 条，状态已更新为准确"
         )
 
     def _view_row(self, row: int) -> None:
