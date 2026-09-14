@@ -700,7 +700,7 @@ class DetailDialog(QDialog):
     def _confirm_document(self) -> None:
         """整体确认：全部待复核项标记确认，文档状态流转为准确。
 
-        落库语义与筛选页的「一键确认」共用 services/review_service.py，
+        落库语义统一由 services/review_service.py 处理，
         保证两条入口结果一致。
         """
         from database.db import get_engine, make_session_factory

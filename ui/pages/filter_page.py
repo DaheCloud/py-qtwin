@@ -195,14 +195,6 @@ class FilterPage(QWidget):
         export_btn.clicked.connect(self._export_selected)
         head.addWidget(export_btn)
 
-        # 一键确认：勾选"可疑/待校验"的记录后批量标记为「准确」
-        self._confirm_btn = QPushButton("✓ 一键确认选中项")
-        self._confirm_btn.setProperty("cssClass", "btn-success")
-        self._confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._confirm_btn.setToolTip("把勾选的「可疑/待校验」记录批量标记为「准确」（记录审计日志）")
-        self._confirm_btn.clicked.connect(self._confirm_selected)
-        head.addWidget(self._confirm_btn)
-
         delete_btn = QPushButton("🗑 批量删除选中项")
         delete_btn.setProperty("cssClass", "btn-danger")
         delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -635,12 +627,6 @@ class FilterPage(QWidget):
         if not ids:
             self._toast.show_message("请先勾选要导出的行")
             return
-        default_name = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(self, "导出 Excel", default_name, "Excel 工作簿 (*.xlsx)")
-        if not path:
-            return
-        if not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
         from sqlalchemy import select
 
         from database.db import get_engine, make_session_factory
@@ -661,36 +647,51 @@ class FilterPage(QWidget):
         engine = get_engine(self._db_path)
         factory = make_session_factory(engine)
 
-        # 仅「准确」(success) 数据可导出；勾选中含「可疑/待校验」时需确认
+        # 准确和待复核数据都可导出；失败/OCR/处理中记录没有完整数据，跳过。
         with factory() as session:
             status_rows = session.execute(
                 select(Document.id, Document.status).where(Document.id.in_(ids))
             ).all()
         status_map = dict(status_rows)
-        ok_ids = {i for i, s in status_map.items() if s == "success"}
-        suspect_n = len(ids) - len(ok_ids)
-        if not ok_ids:
-            self._toast.show_message("勾选的数据中没有「准确」状态的记录，无法导出")
+        exportable_statuses = {"success", "manual_review", "warning"}
+        export_ids = {i for i, status in status_map.items() if status in exportable_statuses}
+        skipped_n = len(ids) - len(export_ids)
+        if not export_ids:
+            self._toast.show_message("勾选的数据中没有「准确」或「可疑/待校验」记录，无法导出")
             return
-        if suspect_n:
-            answer = QMessageBox.question(
-                self,
-                "包含可疑数据",
-                f"勾选中包含 {suspect_n} 条「可疑/待校验」数据，\n"
-                f"将仅导出 {len(ok_ids)} 条「准确」数据。是否继续？",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+
+        success_n = sum(status_map[i] == "success" for i in export_ids)
+        suspect_n = len(export_ids) - success_n
+        message = (
+            f"即将导出 {len(export_ids)} 条数据：\n"
+            f"准确数据：{success_n} 条\n"
+            f"可疑数据：{suspect_n} 条"
+        )
+        if skipped_n:
+            message += f"\n不可导出并跳过：{skipped_n} 条"
+        message += "\n\n是否继续导出？"
+        answer = QMessageBox.question(self, "确认导出", message)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        default_name = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 Excel", default_name, "Excel 工作簿 (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
 
         with factory() as session:
-            stmt = select(Document).where(Document.id.in_(ok_ids))
+            stmt = select(Document).where(Document.id.in_(export_ids))
             # 导出跟随当前可见列（所见即所得）
             visible = [
                 (title, key, fallback)
                 for i, (title, key, fallback, _, _) in enumerate(DATA_COLUMNS)
                 if not self._table.isColumnHidden(COL_DATA_START + i)
             ]
-            headers = ["文件名", *[t for t, _, _ in visible]]
+            headers = ["文件名", "状态", *[t for t, _, _ in visible]]
             wb = Workbook()
             ws = wb.active
             ws.title = "解析结果"
@@ -711,12 +712,12 @@ class FilterPage(QWidget):
                     v = fields.get(key) or (fields.get(fallback) if fallback else None)
                     text = str(v) if v not in (None, "") else ""
                     row_values.append(text if text else None)
-                ws.append([doc.file_name, *row_values])
+                ws.append([doc.file_name, _status_text(doc.status), *row_values])
 
             # 数据行写完后，按列统一设置格式
             last_row = ws.max_row
             for idx, (_, key, _) in enumerate(visible):
-                col = 2 + idx  # Excel 列号：A=文件名，B 起为数据列
+                col = 3 + idx  # Excel 列号：A=文件名，B=状态，C 起为数据列
                 letter = get_column_letter(col)
                 if key in TAX_NO_KEYS:
                     for r in range(2, last_row + 1):
@@ -735,54 +736,9 @@ class FilterPage(QWidget):
             except OSError as e:
                 QMessageBox.warning(self, "导出失败", f"无法写入文件（可能正被 Excel 打开）：\n{e}")
                 return
-        self._toast.show_message(f"已导出 {len(ok_ids)} 条「准确」数据")
-
-    def _confirm_selected(self) -> None:
-        """一键确认：把勾选的「可疑/待校验」记录批量标记为「准确」。
-
-        只处理可疑状态：已经准确的不必再确认，解析失败的关键字段可能缺失，
-        不适合一键放行（需在详情弹窗逐项核对）——跳过的条目会在提示里说明。
-        落库语义与详情弹窗的「确认无误」一致（见 services/review_service.py）。
-        """
-        ids = self._selected_doc_ids()
-        if not ids:
-            self._toast.show_message("请先勾选要确认的行")
-            return
-
-        from database.db import get_engine, make_session_factory
-        from services.review_service import confirm_documents
-
-        engine = get_engine(self._db_path)
-        factory = make_session_factory(engine)
-
-        # 先试算：确认框里明确写出"将确认几条、跳过几条"
-        with factory() as session:
-            preview = confirm_documents(session, ids, source="filter_page", dry_run=True)
-        if not preview.confirmed:
-            self._toast.show_message("勾选的数据中没有「可疑/待校验」记录，无需确认")
-            return
-
-        message = (
-            f"确认选中的 {preview.confirmed_count} 条「可疑/待校验」数据无误？\n"
-            "确认后状态变为「准确」，并记录审计日志。"
-        )
-        if preview.skipped:
-            message += f"\n（另有 {len(preview.skipped)} 条非可疑状态，将跳过）"
-        if preview.missing:
-            message += f"\n（另有 {len(preview.missing)} 条记录已不存在，将跳过）"
-        answer = QMessageBox.question(self, "确认无误", message)
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-
-        with factory() as session:
-            report = confirm_documents(session, preview.confirmed, source="filter_page")
-            session.commit()
-
-        self._select_all_btn.setChecked(False)  # 重置表头全选，避免刷新后勾选态残留
-        self.reload()
+        skipped = f"，跳过 {skipped_n} 条不可导出记录" if skipped_n else ""
         self._toast.show_message(
-            f"已确认 {report.confirmed_count} 条，状态更新为「准确」"
-            + (f"（顺带复核 {report.confirmed_fields} 个字段）" if report.confirmed_fields else "")
+            f"已导出 {len(export_ids)} 条数据（准确 {success_n} 条，可疑 {suspect_n} 条）{skipped}"
         )
 
     def _view_row(self, row: int) -> None:

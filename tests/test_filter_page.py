@@ -1,11 +1,9 @@
-"""筛选页测试：开票年月过滤（纯函数）+ 一键确认（离屏 UI 流程）。
+"""筛选页测试：开票年月过滤、选择计数与 Excel 导出。
 
 年月解析口径：
   · 各种日期写法（标准/中文/斜杠）→ "YYYY-MM"
   · 旧合同数据无 invoice_date 时回落 sign_date
   · 不可解析 → 空串（不参与下拉选项）
-
-一键确认：勾选可疑记录 → 批量标记为「准确」；非可疑状态跳过、取消不生效。
 
 运行：.venv/Scripts/python.exe -m pytest tests/test_filter_page.py -v
 """
@@ -45,7 +43,7 @@ def test_record_month_prefers_invoice_date_then_sign_date():
     assert record_month({"contract_no": "HT20260901"}) == ""
 
 
-# --------------------------------------------------------------- 一键确认（UI 流程）
+# --------------------------------------------------------------- 页面与导出（UI 流程）
 
 
 def _select_all(page, checked: bool = True) -> None:
@@ -59,16 +57,6 @@ def _row_of(page, file_name: str) -> int:
         if page._table.item(row, COL_NAME).text() == file_name:
             return row
     raise AssertionError(f"列表中找不到 {file_name}")
-
-
-def _statuses(db_path) -> dict[str, str]:
-    from sqlalchemy import select
-
-    from database.db import get_engine, make_session_factory
-    from models.document import Document
-
-    with make_session_factory(get_engine(db_path))() as session:
-        return {doc.file_name: doc.status for doc in session.scalars(select(Document))}
 
 
 # 演示数据：可疑 2 条（manual_review / warning）、准确 1、失败 1
@@ -126,79 +114,77 @@ def empty_page(qt_app, tmp_path):
     return _make_page(db_path), db_path
 
 
-def _answer_yes(monkeypatch, yes: bool = True):
-    from PySide6.QtWidgets import QMessageBox
-
-    button = QMessageBox.StandardButton.Yes if yes else QMessageBox.StandardButton.No
-    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: button))
-
-
-def test_confirm_button_present(confirm_page):
+def test_one_click_confirm_button_removed(confirm_page):
     page, _ = confirm_page
-    assert "一键确认" in page._confirm_btn.text()
-    assert "可疑" in page._confirm_btn.toolTip()
+    from PySide6.QtWidgets import QPushButton
+
+    assert not hasattr(page, "_confirm_btn")
+    assert all("一键确认" not in button.text() for button in page.findChildren(QPushButton))
 
 
-def test_one_click_confirm_marks_selected_suspect(confirm_page, monkeypatch):
-    page, db_path = confirm_page
-    _answer_yes(monkeypatch)
+def test_export_includes_success_and_suspect_but_skips_failed(
+    confirm_page, monkeypatch, tmp_path
+):
+    page, _ = confirm_page
+    output = tmp_path / "selected.xlsx"
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    prompts = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(
+            lambda *args, **kwargs: (
+                prompts.append(args[2]) or QMessageBox.StandardButton.Yes
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *args, **kwargs: (str(output), "Excel 工作簿 (*.xlsx)")),
+    )
     _select_all(page)
 
-    page._confirm_selected()
+    page._export_selected()
 
-    assert _statuses(db_path) == {
-        "review.pdf": "success",
-        "warning.pdf": "success",
-        "success.pdf": "success",
-        "failed.pdf": "failed",  # 解析失败不参与一键确认
+    assert "准确数据：1 条" in prompts[0]
+    assert "可疑数据：2 条" in prompts[0]
+    assert "不可导出并跳过：1 条" in prompts[0]
+    from openpyxl import load_workbook
+
+    ws = load_workbook(output, read_only=True).active
+    rows = list(ws.iter_rows(values_only=True))
+    assert rows[0][:2] == ("文件名", "状态")
+    assert {row[0]: row[1] for row in rows[1:]} == {
+        "review.pdf": "可疑/待校验",
+        "warning.pdf": "可疑/待校验",
+        "success.pdf": "准确",
     }
-    assert "已确认 2 条" in page._toast.text()
-    # 确认后重置表头全选，避免刷新后勾选态残留在新行上
-    assert page._select_all_btn.isChecked() is False
+    assert "跳过 1 条" in page._toast.text()
 
 
-def test_confirm_skips_when_selection_has_no_suspect(confirm_page, monkeypatch):
-    page, db_path = confirm_page
-    _answer_yes(monkeypatch)
-    # 仅勾选「准确」那条（行序按导入时间倒序，按文件名定位）
-    page._table.cellWidget(_row_of(page, "success.pdf"), COL_CHECK).setChecked(True)
-
-    page._confirm_selected()
-
-    assert _statuses(db_path)["success.pdf"] == "success"
-    assert "没有" in page._toast.text()
-    # 未确认时不写审计日志
-    from sqlalchemy import select
-
-    from database.db import get_engine, make_session_factory
-    from models.document import AuditLog
-
-    with make_session_factory(get_engine(db_path))() as session:
-        assert session.scalars(select(AuditLog)).all() == []
-
-
-def test_confirm_cancel_keeps_status(confirm_page, monkeypatch):
-    page, db_path = confirm_page
-    _answer_yes(monkeypatch, yes=False)
-    _select_all(page)
-
-    page._confirm_selected()
-
-    assert _statuses(db_path)["review.pdf"] == "manual_review"
-
-
-def test_confirm_clears_review_filter_after_reload(confirm_page, monkeypatch):
-    """在「可疑/待校验」筛选下确认后，这些行应从列表消失（状态已变准确）。"""
+def test_export_cancel_stops_before_file_dialog(confirm_page, monkeypatch):
     page, _ = confirm_page
-    page._status_filter.setCurrentIndex(page._status_filter.findData("review"))
-    page.reload()
-    assert page._table.rowCount() == 2
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-    _answer_yes(monkeypatch)
+    save_dialog_opened = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.No),
+    )
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *args, **kwargs: save_dialog_opened.append(True) or ("", "")),
+    )
     _select_all(page)
-    page._confirm_selected()
 
-    assert page._table.rowCount() == 0
+    page._export_selected()
+
+    assert save_dialog_opened == []
 
 
 # ------------------------------------------------------- "已选择 N 项" 计数（UI 流程）
