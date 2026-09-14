@@ -331,7 +331,7 @@ class DetailDialog(QDialog):
         self._render_signals = _PdfRenderSignals(self)
         self._render_signals.finished.connect(self._on_pdf_rendered)
         pdf_l.addWidget(self._pdf_view, 1)
-        body.addWidget(pdf_wrap, 12)  # ≈1.2fr
+        body.addWidget(pdf_wrap, 2)
 
         # ---- 右：字段校验
         right = QWidget()
@@ -369,7 +369,7 @@ class DetailDialog(QDialog):
         self._fields_l.setSpacing(6)
         self._fields_area.setWidget(self._fields_host)
         right_l.addWidget(self._fields_area, 1)
-        body.addWidget(right, 10)  # ≈1fr
+        body.addWidget(right, 1)
 
         # ---- 底部：整体人工确认（仅待人工确认状态显示）
         footer = QHBoxLayout()
