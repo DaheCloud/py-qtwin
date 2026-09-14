@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtPdf import QPdfDocument
-from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtCore import QObject, QPoint, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -94,11 +93,60 @@ def _badge_for_status(status: str) -> tuple[str, str]:
     }.get(status, ("info", status))
 
 
-class _ZoomablePdfView(QPdfView):
-    """支持 Ctrl+滚轮缩放、左键拖拽平移的 PDF 视图。
+class _PdfRenderSignals(QObject):
+    finished = Signal(int, int, int, QImage, str)
 
-    初始为适应宽度模式；缩放时切换到 Custom 倍率并回调宿主刷新显示。
-    """
+
+class _PdfRenderTask(QRunnable):
+    """在线程池中栅格化一页，复杂矢量 PDF 不占用 GUI 线程。"""
+
+    def __init__(self, request_id: int, path: str, page_index: int, signals: _PdfRenderSignals) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.path = path
+        self.page_index = page_index
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            import pymupdf
+
+            with pymupdf.open(self.path) as document:
+                page_count = document.page_count
+                if page_count < 1:
+                    raise ValueError("PDF 没有可显示的页面")
+                page_index = min(max(0, self.page_index), page_count - 1)
+                page = document.load_page(page_index)
+                # 固定像素上限避免超宽表格按原始矢量尺寸生成巨型图像。
+                width = max(1.0, page.rect.width)
+                height = max(1.0, page.rect.height)
+                scale = min(
+                    4.0,
+                    2400 / width,
+                    (20_000_000 / (width * height)) ** 0.5,
+                )
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+                image = QImage(
+                    pixmap.samples,
+                    pixmap.width,
+                    pixmap.height,
+                    pixmap.stride,
+                    QImage.Format.Format_RGB888,
+                ).copy()
+            self.signals.finished.emit(
+                self.request_id, page_index, page_count, image, ""
+            )
+        except Exception as exc:  # PDF 损坏等错误需要回传到预览区，而不是终止线程
+            try:
+                self.signals.finished.emit(
+                    self.request_id, self.page_index, 0, QImage(), str(exc)
+                )
+            except RuntimeError:
+                pass  # 弹窗已关闭，接收信号的 QObject 已销毁
+
+
+class _ZoomablePdfView(QScrollArea):
+    """显示后台栅格化页面，支持缩放和抓手拖动。"""
 
     MIN_ZOOM, MAX_ZOOM = 0.3, 4.0
 
@@ -106,6 +154,15 @@ class _ZoomablePdfView(QPdfView):
         super().__init__(parent)
         self.on_zoom = None  # callable(factor: float)，由宿主设置
         self._pan_origin: QPoint | None = None
+        self._image = QImage()
+        self._zoom_factor = 1.0
+        self._fit_width = True
+        self._page = QLabel()
+        self._page.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._page.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setWidget(self._page)
+        self.setWidgetResizable(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # 手掌光标提示"按住可拖动"
         self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
 
@@ -149,11 +206,48 @@ class _ZoomablePdfView(QPdfView):
 
     def apply_zoom(self, factor: float) -> None:
         factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, factor))
-        if self.zoomMode() != QPdfView.ZoomMode.Custom:
-            self.setZoomMode(QPdfView.ZoomMode.Custom)
-        self.setZoomFactor(factor)
+        self._fit_width = False
+        self._zoom_factor = factor
+        self._refresh_pixmap()
         if self.on_zoom is not None:
             self.on_zoom(factor)
+
+    def zoomFactor(self) -> float:  # noqa: N802 - 与原 QPdfView API 保持一致
+        return self._zoom_factor
+
+    def fit_width(self) -> None:
+        self._fit_width = True
+        self._zoom_factor = 1.0
+        self._refresh_pixmap()
+
+    def set_image(self, image: QImage) -> None:
+        self._image = image
+        self._refresh_pixmap()
+
+    def set_message(self, text: str) -> None:
+        self._image = QImage()
+        self._page.setPixmap(QPixmap())
+        self._page.setText(text)
+        self._page.adjustSize()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._fit_width:
+            self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if self._image.isNull():
+            return
+        available_width = max(1, self.viewport().width() - 16)
+        fit_scale = min(1.0, available_width / self._image.width())
+        scale = fit_scale * (1.0 if self._fit_width else self._zoom_factor)
+        target_width = max(1, round(self._image.width() * scale))
+        pixmap = QPixmap.fromImage(self._image).scaledToWidth(
+            target_width, Qt.TransformationMode.SmoothTransformation
+        )
+        self._page.setText("")
+        self._page.setPixmap(pixmap)
+        self._page.resize(pixmap.size())
 
 
 class DetailDialog(QDialog):
@@ -211,15 +305,17 @@ class DetailDialog(QDialog):
             zoom_bar.addWidget(w)
         # 翻页：单页按需渲染，避免多页 PDF 打开时同步布局全部页面阻塞界面。
         self._btn_page_prev = self._tool_button(
-            "上一页", lambda: self._pdf_view.pageNavigator().jumpToPreviousPage()
+            "上一页", lambda: self._change_page(-1)
         )
+        self._btn_page_prev.setEnabled(False)
         self._page_label = QLabel("—/—")
         self._page_label.setObjectName("MutedText")
         self._page_label.setFixedWidth(52)
         self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._btn_page_next = self._tool_button(
-            "下一页", lambda: self._pdf_view.pageNavigator().jumpToNextPage()
+            "下一页", lambda: self._change_page(1)
         )
+        self._btn_page_next.setEnabled(False)
         for w in (self._btn_page_prev, self._page_label, self._btn_page_next):
             zoom_bar.addWidget(w)
         zoom_bar.addStretch(1)
@@ -227,12 +323,13 @@ class DetailDialog(QDialog):
 
         self._pdf_view = _ZoomablePdfView()
         self._pdf_view.setObjectName("PdfPreview")
-        self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-        self._pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
         self._pdf_view.on_zoom = lambda f: self._zoom_label.setText(f"{int(f * 100)}%")
-        self._pdf_document: QPdfDocument | None = None
+        self._pdf_path = ""
+        self._page_index = 0
         self._page_count = 0
-        self._page_nav_connected = False
+        self._render_request_id = 0
+        self._render_signals = _PdfRenderSignals(self)
+        self._render_signals.finished.connect(self._on_pdf_rendered)
         pdf_l.addWidget(self._pdf_view, 1)
         body.addWidget(pdf_wrap, 12)  # ≈1.2fr
 
@@ -300,13 +397,50 @@ class DetailDialog(QDialog):
 
     def _fit_pdf_width(self) -> None:
         """恢复适应宽度模式，倍率显示还原。"""
-        self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self._pdf_view.fit_width()
         self._zoom_label.setText("适应宽度")
 
     def _update_page_label(self, index: int) -> None:
         """页码标签（当前页/总页数）：连续滚动或点翻页时刷新。"""
         total = self._page_count or 0
         self._page_label.setText(f"{index + 1}/{total}" if total else "—/—")
+
+    def _change_page(self, step: int) -> None:
+        target = min(max(0, self._page_index + step), max(0, self._page_count - 1))
+        if target != self._page_index:
+            self._request_pdf_page(target)
+
+    def _load_pdf(self, path: str) -> None:
+        if path != self._pdf_path:
+            self._pdf_path = path
+            self._page_index = 0
+            self._page_count = 0
+        self._request_pdf_page(self._page_index)
+
+    def _request_pdf_page(self, page_index: int) -> None:
+        self._render_request_id += 1
+        self._pdf_view.set_message("正在加载 PDF…")
+        task = _PdfRenderTask(
+            self._render_request_id, self._pdf_path, page_index, self._render_signals
+        )
+        QThreadPool.globalInstance().start(task)
+
+    def _on_pdf_rendered(
+        self, request_id: int, page_index: int, page_count: int, image: QImage, error: str
+    ) -> None:
+        if request_id != self._render_request_id:
+            return
+        if error:
+            self._page_count = 0
+            self._update_page_label(0)
+            self._pdf_view.set_message(f"PDF 加载失败：{error}")
+            return
+        self._page_index = page_index
+        self._page_count = page_count
+        self._pdf_view.set_image(image)
+        self._update_page_label(page_index)
+        self._btn_page_prev.setEnabled(page_index > 0)
+        self._btn_page_next.setEnabled(page_index + 1 < page_count)
 
     def load_document(self) -> None:
         """从 DB 拉取字段与验证结果，并加载 PDF 预览（确认操作后重建）。"""
@@ -467,23 +601,14 @@ class DetailDialog(QDialog):
         self._fields_l.addStretch(1)
 
         if pdf_path and Path(pdf_path).exists():
-            document = QPdfDocument(self)
-            if document.load(pdf_path) == QPdfDocument.Error.None_:
-                self._pdf_document = document
-                self._pdf_view.setDocument(document)
-                self._page_count = document.pageCount()
-                navigator = self._pdf_view.pageNavigator()
-                if not self._page_nav_connected:
-                    # 确认操作后 load_document 会重建：信号只连一次，避免重复触发
-                    navigator.currentPageChanged.connect(self._update_page_label)
-                    self._page_nav_connected = True
-                self._update_page_label(navigator.currentPage())
-                # 单页文档：翻页按钮无意义，置灰
-                for btn in (self._btn_page_prev, self._btn_page_next):
-                    btn.setEnabled(self._page_count > 1)
+            self._load_pdf(str(pdf_path))
         else:
+            self._pdf_path = ""
             self._page_count = 0
             self._update_page_label(0)
+            self._pdf_view.set_message("PDF 文件不存在")
+            self._btn_page_prev.setEnabled(False)
+            self._btn_page_next.setEnabled(False)
 
     def _add_hint(self, text: str) -> None:
         label = QLabel(text)
