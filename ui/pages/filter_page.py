@@ -691,7 +691,7 @@ class FilterPage(QWidget):
                 for i, (title, key, fallback, _, _) in enumerate(DATA_COLUMNS)
                 if not self._table.isColumnHidden(COL_DATA_START + i)
             ]
-            headers = ["文件名", "状态", *[t for t, _, _ in visible]]
+            headers = ["文件名", *[t for t, _, _ in visible], "状态"]
             wb = Workbook()
             ws = wb.active
             ws.title = "解析结果"
@@ -712,12 +712,12 @@ class FilterPage(QWidget):
                     v = fields.get(key) or (fields.get(fallback) if fallback else None)
                     text = str(v) if v not in (None, "") else ""
                     row_values.append(text if text else None)
-                ws.append([doc.file_name, _status_text(doc.status), *row_values])
+                ws.append([doc.file_name, *row_values, _status_text(doc.status)])
 
             # 数据行写完后，按列统一设置格式
             last_row = ws.max_row
             for idx, (_, key, _) in enumerate(visible):
-                col = 3 + idx  # Excel 列号：A=文件名，B=状态，C 起为数据列
+                col = 2 + idx  # Excel 列号：A=文件名，B 起为数据列，状态在最后
                 letter = get_column_letter(col)
                 if key in TAX_NO_KEYS:
                     for r in range(2, last_row + 1):

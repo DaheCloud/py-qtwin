@@ -12,6 +12,7 @@
 - PDF 预检查
 - 模板指纹识别
 - Fixed / Dynamic 两套字段解析
+
 - Table First 表格解析
 - PyMuPDF + pdfplumber 双引擎
 - 结构校验

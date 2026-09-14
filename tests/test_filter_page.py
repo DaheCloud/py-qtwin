@@ -156,8 +156,9 @@ def test_export_includes_success_and_suspect_but_skips_failed(
 
     ws = load_workbook(output, read_only=True).active
     rows = list(ws.iter_rows(values_only=True))
-    assert rows[0][:2] == ("文件名", "状态")
-    assert {row[0]: row[1] for row in rows[1:]} == {
+    assert rows[0][0] == "文件名"
+    assert rows[0][-1] == "状态"
+    assert {row[0]: row[-1] for row in rows[1:]} == {
         "review.pdf": "可疑/待校验",
         "warning.pdf": "可疑/待校验",
         "success.pdf": "准确",
