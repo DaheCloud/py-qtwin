@@ -84,8 +84,45 @@ def _validate_items_math(
 ) -> list[CheckResult]:
     """items 模式：逐行两条关系 + Σ明细≈合计两条 + 合计金额+税额≈价税合计。"""
     results = _check_rows_math(items)
+    results.extend(_check_page_subtotals(report, items))
     results.extend(_check_sums(config, report, items))
     results.extend(_check_grand_total(config.get("totals") or {}, report))
+    return results
+
+
+def _check_page_subtotals(report: Any, items: list[dict[str, Any]]) -> list[CheckResult]:
+    """逐页校验该页明细求和与页面小计，整票合计仍由 _check_sums 校验。"""
+    table = getattr(report, "table", None)
+    subtotals = list(getattr(table, "subtotals", None) or [])
+    results: list[CheckResult] = []
+    for subtotal in subtotals:
+        start = int(subtotal.get("item_start", 0))
+        end = int(subtotal.get("item_end", start))
+        page_items = items[start:end]
+        page_no = int(subtotal.get("page", 0)) + 1
+        for key, label in (("amount", "金额"), ("tax", "税额")):
+            values = [to_decimal(item.get(key)) for item in page_items]
+            actual = to_decimal(subtotal.get(key))
+            rule = f"page_{page_no}_subtotal_{key}"
+            if not values or actual is None or any(value is None for value in values):
+                results.append(
+                    CheckResult(
+                        rule,
+                        True,
+                        f"第 {page_no} 页明细或小计{label}不完整，跳过本页小计校验",
+                        skipped=True,
+                    )
+                )
+                continue
+            expected = sum(values, Decimal("0"))
+            results.append(
+                CheckResult(
+                    rule,
+                    approx_equal(expected, actual),
+                    f"第 {page_no} 页明细{label}={money(expected)} vs 本页小计={money(actual)}",
+                    severity=severity_for(expected, actual),
+                )
+            )
     return results
 
 

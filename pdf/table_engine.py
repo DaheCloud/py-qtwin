@@ -129,6 +129,8 @@ class TableResult:
 
     columns: dict[str, TableColumn] = field(default_factory=dict)
     items: list[dict[str, Any]] = field(default_factory=list)
+    # 每页小计及其对应的明细切片（item_start <= index < item_end）。
+    subtotals: list[dict[str, Any]] = field(default_factory=list)
     header_y: float | None = None
     stop_y: float | None = None
     physical_rows: int = 0
@@ -162,6 +164,7 @@ class TableResult:
             ),
             "columns": [col.as_dict() for col in self.columns.values()],
             "items": [dict(item) for item in self.items],
+            "subtotals": [dict(subtotal) for subtotal in self.subtotals],
         }
 
 
@@ -191,6 +194,8 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
     ]
     rows = group_rows(region, tolerance=_row_tolerance(words, config))
     rows = _split_overlapping_rows(rows, columns, config)
+    subtotal_rows = [row for row in rows if _is_subtotal_row(row)]
+    rows = [row for row in rows if not _is_subtotal_row(row)]
     result.physical_rows = len(rows)
 
     # V2（方案 §8.2）：用前几行真实数据微调列边界（表头中心点只是初值）
@@ -204,6 +209,10 @@ def extract_table(words: list[Word], config: dict[str, Any], *, page: int = 0) -
     )
     _record_item_ambiguities(result, items)
     result.items = items
+    result.subtotals.extend(
+        _subtotal_record(row, columns, page, 0, len(items))
+        for row in subtotal_rows
+    )
     if not items:
         result.issues.append("table_no_rows")
     else:
@@ -245,11 +254,13 @@ def extract_table_multipage(
     }
     suffix = bool(config.get("suffix_continuation", True))
 
-    for words in iterator:
+    for page, words in enumerate(iterator, start=1):
         stop_y = find_stop_y(words, config.get("stop_anchor"), after_y=0.0)
         region = [w for w in words if stop_y is None or w.y0 < stop_y - _EPS]
         rows = group_rows(region, tolerance=_row_tolerance(words, config))
         rows = _split_overlapping_rows(rows, result.columns, config)
+        subtotal_rows = [row for row in rows if _is_subtotal_row(row)]
+        rows = [row for row in rows if not _is_subtotal_row(row)]
 
         # 后续页的噪声行：重复表头行（表头底部作为区域起点，其上方的页眉
         # 一并排除）、页脚行。不做这层过滤时，表头文字会因"短文本即数据"
@@ -267,6 +278,7 @@ def extract_table_multipage(
         if header_bottom is not None:
             kept = [row for row in kept if row[0].y0 >= header_bottom - _EPS]
 
+        item_start = len(result.items)
         new_items, trailing = _build_items(
             kept, result.columns, suffix_continuation=suffix, index_offset=len(result.items)
         )
@@ -276,6 +288,12 @@ def extract_table_multipage(
         if new_items:
             result.items.extend(new_items)
             result.physical_rows += len(kept)
+        result.subtotals.extend(
+            _subtotal_record(
+                row, result.columns, page, item_start, len(result.items)
+            )
+            for row in subtotal_rows
+        )
         if stop_y is not None:
             # 合计行在本页：表格闭合。明细先并入再收尾——"明细全在第 1 页、
             # 合计行在第 2 页"时本页没有新明细，但表格确实已闭合（审计口径）
@@ -312,7 +330,7 @@ def _columns_from_config(config: dict[str, Any]) -> dict[str, TableColumn]:
 def _matches(text: str, headers: tuple[str, ...]) -> bool:
     compact = text.replace(" ", "")
     # 表尾汇总标签不是明细列标题，不能因“金额/税额”子串而启动表格重建。
-    if "合计" in compact and all(
+    if any(marker in compact for marker in ("合计", "小计")) and all(
         compact != header.replace(" ", "") for header in headers
     ):
         return False
@@ -806,6 +824,37 @@ def _is_page_footer_row(row: list[Word]) -> bool:
     """整行都是页脚噪声（页码/"第 N 页 共 M 页"/"下载次数" 等）→ 丢弃。"""
     texts = [w.text.strip() for w in row if w.text.strip()]
     return bool(texts) and all(_PAGE_FOOTER.fullmatch(text) for text in texts)
+
+
+def _is_subtotal_row(row: list[Word]) -> bool:
+    """识别“本页小计/小计”行，防止其金额再次计入普通明细。"""
+    compact = "".join(w.text.replace(" ", "") for w in sorted(row, key=lambda w: w.x0))
+    return "小计" in compact
+
+
+def _subtotal_record(
+    row: list[Word],
+    columns: dict[str, TableColumn],
+    page: int,
+    item_start: int,
+    item_end: int,
+) -> dict[str, Any]:
+    cells: dict[str, list[Word]] = {key: [] for key in columns}
+    for word in row:
+        key = _column_key_at(columns, word.cx)
+        if key is not None:
+            cells[key].append(word)
+    return {
+        "page": page,
+        "item_start": item_start,
+        "item_end": item_end,
+        "amount": _cell_value(cells.get("amount", []), columns["amount"])
+        if "amount" in columns and columns["amount"].present
+        else None,
+        "tax": _cell_value(cells.get("tax", []), columns["tax"])
+        if "tax" in columns and columns["tax"].present
+        else None,
+    }
 
 
 def _looks_like_header_row(

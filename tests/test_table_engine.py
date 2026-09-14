@@ -76,6 +76,14 @@ def _totals_row(y: float) -> list[_Word]:
     ]
 
 
+def _subtotal_row(y: float, amount: str, tax: str) -> list[_Word]:
+    return [
+        _Word(60, y, 90, y + 9, "小 计"),
+        _Word(350, y, 400, y + 9, amount),
+        _Word(500, y, 550, y + 9, tax),
+    ]
+
+
 # ----------------------------------------------------------- 表头与列边界
 
 
@@ -842,6 +850,45 @@ class TestMultipageTable:
         assert result.items[2]["amount"] == "300.00"
         assert result.items[2]["tax"] == "9.00"
         assert result.items[1]["amount"] == "1200.00"
+
+    def test_page_subtotal_is_not_counted_as_an_item(self):
+        page1 = [
+            *_header(),
+            *_data_row(273, unit_price="100.00", amount="100.00", tax="3.00"),
+            *_data_row(295, unit_price="200.00", amount="200.00", tax="6.00"),
+            *_subtotal_row(340, "300.00", "9.00"),
+        ]
+        page2 = [
+            *_data_row(60, name="*建筑服务*安装款", unit_price="50.00", amount="50.00", tax="1.50"),
+            *_totals_row(120),
+        ]
+
+        result = extract_table_multipage(iter([page1, page2]), _table_config())
+
+        assert [item["amount"] for item in result.items] == ["100.00", "200.00", "50.00"]
+        assert result.subtotals == [
+            {
+                "page": 0,
+                "item_start": 0,
+                "item_end": 2,
+                "amount": "300.00",
+                "tax": "9.00",
+            }
+        ]
+
+        checks = validate_business(
+            _template(),
+            _items_report(
+                result.items,
+                amount="350.00",
+                tax="10.50",
+                grand="360.50",
+                table=result,
+            ),
+        )
+        page_checks = [check for check in checks if "subtotal" in check.rule]
+        assert len(page_checks) == 2
+        assert all(check.passed for check in page_checks)
 
     def test_continuation_stops_at_totals_on_second_page(self):
         """第 2 页命中合计锚点 → 合计行之后的文本不进入明细。"""
