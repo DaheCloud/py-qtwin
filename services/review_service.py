@@ -97,7 +97,11 @@ def confirm_documents(
         if doc is None:
             report.missing.append(doc_id)
             continue
-        if only_suspect and not needs_review(doc):
+        # 批量入口只允许可疑状态。failed 即使 review_status=pending，也必须
+        # 在详情中逐项核对后单条确认，不能混入一键确认。
+        if only_suspect and (
+            not needs_review(doc) or doc.status not in SUSPECT_STATUSES
+        ):
             report.skipped.append((doc_id, doc.status))
             continue
         report.confirmed.append(doc_id)

@@ -61,3 +61,8 @@ def test_manual_confirmation_does_not_change_machine_quality():
         quality_status="warning",
         review_status=REVIEW_CONFIRMED,
     ) == "success"
+    assert legacy_status(
+        processing_status="completed",
+        quality_status="invalid",
+        review_status=REVIEW_CONFIRMED,
+    ) == "success"

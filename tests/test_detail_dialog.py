@@ -27,6 +27,34 @@ def test_missing_pdf_disables_page_navigation(qt_app, tmp_path):
     assert not dialog._btn_page_next.isEnabled()
 
 
+def test_quality_failure_offers_individual_manual_confirmation(qt_app, tmp_path):
+    from database.db import get_engine, init_db, make_session_factory
+    from models.document import Document
+    from ui.pages.detail_dialog import DetailDialog
+
+    db_path = tmp_path / "app.db"
+    engine = get_engine(db_path)
+    init_db(engine)
+    with make_session_factory(engine)() as session:
+        document = Document(
+            file_name="invalid.pdf",
+            file_path="",
+            file_hash="invalid",
+            status="failed",
+            processing_status="completed",
+            quality_status="invalid",
+            review_status="pending",
+        )
+        session.add(document)
+        session.commit()
+        document_id = document.id
+
+    dialog = DetailDialog(str(db_path), document_id, "invalid.pdf")
+
+    assert not dialog._confirm_doc_btn.isHidden()
+    assert dialog._confirm_doc_btn.text() == "✓ 人工确认并标记为准确"
+
+
 def test_pdf_page_is_rendered_in_background(qt_app, tmp_path):
     """复杂页面走后台栅格化，并把完成结果安全送回预览控件。"""
     import time

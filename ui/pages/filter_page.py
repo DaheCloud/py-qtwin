@@ -88,7 +88,11 @@ _STATUS_TO_KIND = {
 }
 
 
-def _status_text(status: str) -> str:
+def _status_text(status: str, review_status: str | None = None) -> str:
+    if status == "success" and review_status == "confirmed":
+        return "人工准确"
+    if status == "success" and review_status == "corrected":
+        return "人工修正"
     return _STATUS_TEXT.get(status, status)
 
 
@@ -421,9 +425,10 @@ class FilterPage(QWidget):
                 return
             fields = {f.field_name: f.normalized_value for f in doc.fields}
             status = doc.status
+            review_status = doc.review_status
         kind = _STATUS_TO_KIND.get(status, "info")
         status_item = self._table.item(row, COL_STATUS)
-        status_item.setText(_status_text(status))
+        status_item.setText(_status_text(status, review_status))
         status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         status_item.setData(Qt.ItemDataRole.UserRole, kind)
 
@@ -726,7 +731,13 @@ class FilterPage(QWidget):
                     v = fields.get(key) or (fields.get(fallback) if fallback else None)
                     text = str(v) if v not in (None, "") else ""
                     row_values.append(text if text else None)
-                ws.append([doc.file_name, *row_values, _status_text(doc.status)])
+                ws.append(
+                    [
+                        doc.file_name,
+                        *row_values,
+                        _status_text(doc.status, doc.review_status),
+                    ]
+                )
 
             # 数据行写完后，按列统一设置格式
             last_row = ws.max_row

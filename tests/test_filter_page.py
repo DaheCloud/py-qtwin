@@ -18,7 +18,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ui.pages.filter_page import COL_ACTION, COL_CHECK, COL_NAME, record_month, year_month
+from ui.pages.filter_page import (
+    COL_ACTION,
+    COL_CHECK,
+    COL_NAME,
+    COL_STATUS,
+    record_month,
+    year_month,
+)
 
 
 def test_year_month_parses_common_formats():
@@ -148,6 +155,9 @@ def test_one_click_confirm_only_confirms_selected_suspect_rows(confirm_page, mon
         "success.pdf": "success",
         "failed.pdf": "failed",
     }
+    assert page._table.item(_row_of(page, "review.pdf"), COL_STATUS).text() == "人工准确"
+    assert page._table.item(_row_of(page, "warning.pdf"), COL_STATUS).text() == "人工准确"
+    assert page._table.item(_row_of(page, "success.pdf"), COL_STATUS).text() == "准确"
     assert "已确认 2 条" in page._toast.text()
 
 

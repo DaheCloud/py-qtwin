@@ -456,6 +456,7 @@ class DetailDialog(QDialog):
                 self._add_hint("未找到该文档记录")
                 return
             status = doc.status
+            processing_status = doc.processing_status
             review_status = doc.review_status
             quality_status = doc.quality_status
             document_score = doc.document_score
@@ -502,13 +503,26 @@ class DetailDialog(QDialog):
         _clear_layout(self._fields_l)
 
         self._doc_status = status
-        # V2（方案 §10）：能确认的判据是"复核状态待处理"，不再只看展示状态
-        if review_status:
-            self._confirm_doc_btn.setVisible(review_status == "pending")
-        else:
-            self._confirm_doc_btn.setVisible(status in ("manual_review", "warning"))
+        # 数据异常型失败允许逐项核对后单条人工放行；PDF 处理错误没有可核对的
+        # 完整解析结果，不能确认。失败记录始终不进入列表页的批量确认。
+        can_confirm = (
+            review_status == "pending"
+            and processing_status == "completed"
+        ) or (
+            not review_status and status in ("manual_review", "warning")
+        )
+        self._confirm_doc_btn.setVisible(can_confirm)
+        self._confirm_doc_btn.setText(
+            "✓ 人工确认并标记为准确"
+            if status == "failed"
+            else "✓ 确认无误，标记为准确"
+        )
 
         kind, text = _badge_for_status(status)
+        if status == "success" and review_status == "confirmed":
+            text = "人工准确"
+        elif status == "success" and review_status == "corrected":
+            text = "人工修正"
         badge = Badge(text, kind)
         badge.setFont(ui_font(9, 500))
         self._status_badge_host.addWidget(badge)
@@ -834,9 +848,13 @@ class DetailDialog(QDialog):
         from models.document import Document
         from services.review_service import confirm_document
 
-        answer = QMessageBox.question(
-            self, "确认无误", "确认所有字段与 PDF 原文一致，并将该文档标记为「准确」？"
-        )
+        message = "确认所有字段与 PDF 原文一致，并将该文档标记为「准确」？"
+        if self._doc_status == "failed":
+            message = (
+                "该记录被机器判定为数据异常。\n"
+                "请确认已逐项核对提取结果与 PDF 原文一致，是否人工放行并标记为「准确」？"
+            )
+        answer = QMessageBox.question(self, "人工确认", message)
         if answer != QMessageBox.StandardButton.Yes:
             return
         engine = get_engine(self._db_path)

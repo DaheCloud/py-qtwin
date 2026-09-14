@@ -96,6 +96,22 @@ class TestStatusGate:
 
 
 class TestConfirmDocuments:
+    def test_failed_review_pending_record_is_still_excluded_from_batch(self, factory):
+        with factory() as session:
+            doc = _doc(session, "invalid.pdf", "failed")
+            doc.processing_status = "completed"
+            doc.quality_status = "invalid"
+            doc.review_status = "pending"
+            session.commit()
+            doc_id = doc.id
+
+        with factory() as session:
+            report = confirm_documents(session, [doc_id], source="filter_page")
+            session.commit()
+
+        assert report.confirmed == []
+        assert report.skipped == [(doc_id, "failed")]
+
     def test_only_suspect_records_are_confirmed(self, factory):
         ids = _seed(factory)
 
@@ -216,6 +232,26 @@ class TestConfirmDocuments:
 
 
 class TestConfirmDocument:
+    def test_failed_quality_can_be_confirmed_individually(self, factory):
+        with factory() as session:
+            doc = _doc(session, "invalid.pdf", "failed")
+            doc.processing_status = "completed"
+            doc.quality_status = "invalid"
+            doc.review_status = "pending"
+            session.commit()
+            doc_id = doc.id
+
+        with factory() as session:
+            doc = session.get(Document, doc_id)
+            confirm_document(session, doc, source="detail_dialog")
+            session.commit()
+
+        with factory() as session:
+            doc = session.get(Document, doc_id)
+            assert doc.status == "success"
+            assert doc.quality_status == "invalid"
+            assert doc.review_status == "confirmed"
+
     def test_direct_confirm_ignores_status_gate(self, factory):
         """详情弹窗的按钮只在可疑状态显示，直接确认不再做状态判断。"""
         ids = _seed(factory)

@@ -74,7 +74,7 @@ def determine_quality_status(
     """质量状态（方案 §17.2 / §18）——临界字段不吃平均值。
 
     顺序：
-      · critical 字段无效或低于 CRITICAL_BLOCK（0.65）→ invalid（不允许 success）；
+      · critical 字段无效或低于 CRITICAL_BLOCK（0.65）→ invalid（自动流程不允许 success）；
       · 文档质量分低于 DOC_INVALID（0.75）→ invalid；
       · critical 低于 CRITICAL_REVIEW（0.80）/ 必填字段缺失或低可信 /
         文档分偏低 / **识别不确定**（通用兜底模板）/ **存在结构或业务风险信号**
@@ -116,11 +116,11 @@ def legacy_status(
         return "failed"
     if processing_status != PROCESSING_COMPLETED:
         return "pending"
+    if review_status in (REVIEW_CONFIRMED, REVIEW_CORRECTED):
+        # 人工逐项核对后可放行 warning/invalid，机器质量结论仍保留用于审计。
+        return "success"
     if quality_status == QUALITY_INVALID:
         return "failed"
-    if review_status in (REVIEW_CONFIRMED, REVIEW_CORRECTED):
-        # 人工已放行：展示层视为通过（quality_status 仍保留机器结论）
-        return "success"
     if quality_status == QUALITY_VALID:
         return "success"
     return "manual_review"
@@ -146,12 +146,12 @@ def final_display_status(doc: Any) -> str:
         return "等待 OCR"
     if processing == PROCESSING_ERROR:
         return "解析失败"
-    if quality == QUALITY_INVALID:
-        return "数据异常"
     if review == REVIEW_CORRECTED:
         return "人工已修正"
     if review == REVIEW_CONFIRMED:
-        return "人工已确认"
+        return "人工准确"
+    if quality == QUALITY_INVALID:
+        return "数据异常"
     if review == REVIEW_REJECTED:
         return "已驳回"
     if review == REVIEW_PENDING:
