@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import atexit
 import queue
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.styles import ui_font
+from pdf.parse_profiles import PARSE_SIMPLE, PARSE_PROFILE_LABELS
 from ui.widgets.common import BadgeDelegate, ProgressDelegate, Toast
 
 _STATUS_TO_KIND = {
@@ -40,10 +44,12 @@ _STATUS_TO_KIND = {
 
 _ROW_ID = Qt.ItemDataRole.UserRole + 1
 _ROW_PATH = Qt.ItemDataRole.UserRole + 2
-_ROW_STATE = Qt.ItemDataRole.UserRole + 3  # uploading / parsing / done / failed
+_ROW_STATE = Qt.ItemDataRole.UserRole + 3  # waiting / uploading / queued / parsing / done / failed
 _ROW_FORCE = Qt.ItemDataRole.UserRole + 4  # 覆盖导入（手动确认过查重）
+_ROW_PROFILE = Qt.ItemDataRole.UserRole + 5
 
-COL_NAME, COL_SIZE, COL_TIME, COL_PROGRESS, COL_STATUS, COL_ACTION = range(6)
+COL_NAME, COL_SIZE, COL_TIME, COL_PROGRESS, COL_STATUS, COL_ACTION, COL_MODE = range(7)
+UPLOAD_BATCH_SIZE = 3
 
 
 def _now_str() -> str:
@@ -53,15 +59,16 @@ def _now_str() -> str:
 class _ParseWorker(QObject):
     """后台解析线程：串行消费解析队列，避免并发写 SQLite。"""
 
+    task_started = Signal(str)  # row_id，后台真正取出任务时通知界面
     task_done = Signal(str, str, str, int)  # row_id, status, reason, document_id
 
     def __init__(self, db_path: str) -> None:
         super().__init__()
         self._db_path = db_path
-        self._tasks: queue.Queue[tuple[str, str, bool] | None] = queue.Queue()
+        self._tasks: queue.Queue[tuple[str, str, bool, str] | None] = queue.Queue()
 
-    def submit(self, row_id: str, pdf_path: str, force: bool = False) -> None:
-        self._tasks.put((row_id, pdf_path, force))
+    def submit(self, row_id: str, pdf_path: str, force: bool = False, parse_profile: str = PARSE_SIMPLE) -> None:
+        self._tasks.put((row_id, pdf_path, force, parse_profile))
 
     def stop(self) -> None:
         self._tasks.put(None)
@@ -81,10 +88,13 @@ class _ParseWorker(QObject):
             task = self._tasks.get()
             if task is None:
                 return
-            row_id, pdf_path, force = task
+            row_id, pdf_path, force, parse_profile = task
+            self.task_started.emit(row_id)
             try:
                 with factory() as session:
-                    doc = service.process_document(session, pdf_path, None, force=force)
+                    doc = service.process_document(
+                        session, pdf_path, None, force=force, parse_profile=parse_profile
+                    )
                     reason = doc.error_reason or ("解析完成" if doc.status == "success" else "")
                     self.task_done.emit(row_id, doc.status, reason, int(doc.id))
             except Exception as exc:  # noqa: BLE001 — 后台线程兜底，错误回填到行
@@ -152,6 +162,8 @@ class UploadPage(QWidget):
         self._db_path = db_path
         self._toast = Toast(self)
         self._error_toast = Toast(self)  # 错误专用：5s，独立于普通提示，不被其覆盖
+        self._pending_uploads: deque[str] = deque()
+        self._active_batch: set[str] = set()
 
         # 批量结果聚合：600ms 无新完成事件后汇总一条提示，
         # 避免多文件批量时提示互相覆盖（每个失败原因仍在行悬停提示中）
@@ -165,6 +177,23 @@ class UploadPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(16)
+
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("解析模式")
+        mode_row.addWidget(mode_label)
+        self._parse_profile = QComboBox()
+        self._parse_profile.setAccessibleName("解析模式")
+        for profile, label in PARSE_PROFILE_LABELS.items():
+            self._parse_profile.addItem(label, profile)
+        mode_label.setBuddy(self._parse_profile)
+        mode_row.addWidget(self._parse_profile)
+        mode_row.addStretch(1)
+        root.addLayout(mode_row)
+        self._profile_hint = QLabel()
+        self._profile_hint.setWordWrap(True)
+        self._parse_profile.currentIndexChanged.connect(self._update_profile_hint)
+        self._update_profile_hint()
+        root.addWidget(self._profile_hint)
 
         self._drop = _DropZone()
         self._drop.files_dropped.connect(self.handle_paths)
@@ -189,8 +218,13 @@ class UploadPage(QWidget):
         head.addWidget(clear_btn)
         card_l.addLayout(head)
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(["文件名", "文件大小", "导入时间", "上传进度", "状态", "操作"])
+        self._parse_activity = QLabel("等待添加 PDF 文件")
+        self._parse_activity.setWordWrap(True)
+        self._parse_activity.setTextFormat(Qt.TextFormat.PlainText)
+        card_l.addWidget(self._parse_activity)
+
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels(["文件名", "文件大小", "导入时间", "上传进度", "状态", "操作", "解析模式"])
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(48)  # 容纳按钮文字（YaHei 行高较高）
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -199,9 +233,10 @@ class UploadPage(QWidget):
         header.setMinimumSectionSize(56)
         header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
         # Interactive：默认宽度合理，且用户可拖动列边界自行调整
-        for col, width in ((COL_SIZE, 80), (COL_TIME, 175), (COL_PROGRESS, 170), (COL_STATUS, 100), (COL_ACTION, 90)):
+        for col, width in ((COL_SIZE, 80), (COL_TIME, 175), (COL_PROGRESS, 170), (COL_STATUS, 100), (COL_ACTION, 90), (COL_MODE, 100)):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
             self._table.setColumnWidth(col, width)
+        header.moveSection(header.visualIndex(COL_MODE), 1)
         self._table.setItemDelegateForColumn(COL_PROGRESS, ProgressDelegate(self._table))
         self._table.setItemDelegateForColumn(COL_STATUS, BadgeDelegate(self._table))
         card_l.addWidget(self._table, 1)
@@ -223,18 +258,41 @@ class UploadPage(QWidget):
     def handle_paths(self, paths: list[str]) -> None:
         if not paths:
             return
+        parse_profile = self._parse_profile.currentData()
         normal, force_paths = self._split_duplicates(paths)
         import_time = _now_str()  # 与 JS 一致：本次添加动作统一时间
         force_set = set(force_paths)
         for path in normal + force_paths:
-            row_id = f"{datetime.now().timestamp():.6f}-{id(path)}"
-            self._add_row(row_id, path, import_time, force=path in force_set)
-        msg = f"已成功添加 {len(normal) + len(force_paths)} 个文件到队列"
+            row_id = uuid4().hex
+            self._add_row(row_id, path, import_time, force=path in force_set, parse_profile=parse_profile)
+            row = self._table.rowCount() - 1
+            self._table.item(row, COL_NAME).setData(_ROW_STATE, "waiting")
+            self._set_status(row, "info", "等待上传")
+            self._pending_uploads.append(row_id)
+        count = len(normal) + len(force_paths)
+        if not count:
+            return
+        self._start_next_upload_batch()
+        msg = f"已接收 {count} 个文件，每批 {UPLOAD_BATCH_SIZE} 个依次处理"
         if force_paths:
             msg += f"（其中 {len(force_paths)} 个为覆盖导入）"
         self._toast.show_message(msg)
-        if not self._timer.isActive():
-            self._timer.start()
+        self._refresh_parse_activity()
+
+    def _start_next_upload_batch(self) -> None:
+        """本批全部完成或取消后，启动列表中最多三个等待上传的文件。"""
+        if self._active_batch or not self._pending_uploads:
+            return
+        for _ in range(min(UPLOAD_BATCH_SIZE, len(self._pending_uploads))):
+            row_id = self._pending_uploads.popleft()
+            row = self._find_row(row_id)
+            if row is None:
+                continue
+            self._active_batch.add(row_id)
+            self._table.item(row, COL_NAME).setData(_ROW_STATE, "uploading")
+            self._set_status(row, "info", "上传中...")
+        self._timer.start()
+        self._refresh_parse_activity()
 
     def _split_duplicates(self, paths: list[str]) -> tuple[list[str], list[str]]:
         """入库前主线程预检重复。
@@ -274,11 +332,19 @@ class UploadPage(QWidget):
 
     # ------------------------------------------------------------- 私有
 
+    def _update_profile_hint(self) -> None:
+        self._profile_hint.setText(
+            "简化解析：保留发票基本信息、合计金额、合计税额和价税合计，跳过明细列。"
+            if self._parse_profile.currentData() == PARSE_SIMPLE else
+            "详细解析：提取发票基本信息、全部明细列及合计，并进行完整校验。"
+        )
+
     def _pick_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "选取 PDF 文件", "", "PDF 文件 (*.pdf)")
         self.handle_paths(paths)
 
-    def _add_row(self, row_id: str, path: str, import_time: str, force: bool = False) -> None:
+    def _add_row(self, row_id: str, path: str, import_time: str, force: bool = False,
+                 parse_profile: str = PARSE_SIMPLE) -> None:
         r = self._table.rowCount()
         self._table.insertRow(r)
 
@@ -287,8 +353,12 @@ class UploadPage(QWidget):
         name_item.setData(_ROW_PATH, path)
         name_item.setData(_ROW_STATE, "uploading")
         name_item.setData(_ROW_FORCE, force)
-        name_item.setToolTip(path)
+        name_item.setData(_ROW_PROFILE, parse_profile)
+        name_item.setToolTip(f"{path}\n解析模式：{PARSE_PROFILE_LABELS[parse_profile]}")
         self._table.setItem(r, COL_NAME, name_item)
+        mode_item = QTableWidgetItem(PARSE_PROFILE_LABELS[parse_profile])
+        mode_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(r, COL_MODE, mode_item)
 
         try:
             size_mb = Path(path).stat().st_size / 1024 / 1024
@@ -343,25 +413,63 @@ class UploadPage(QWidget):
             progress += random.randint(10, 35)
             if progress >= 100:
                 self._table.item(r, COL_PROGRESS).setData(Qt.ItemDataRole.UserRole, 100)
-                name_item.setData(_ROW_STATE, "parsing")
-                self._set_status(r, "info", "解析中...")
-                self._submit_parse(row_id, name_item.data(_ROW_PATH), bool(name_item.data(_ROW_FORCE)))
+                name_item.setData(_ROW_STATE, "queued")
+                self._set_status(r, "info", "等待解析")
+                self._submit_parse(
+                    row_id, name_item.data(_ROW_PATH), bool(name_item.data(_ROW_FORCE)),
+                    name_item.data(_ROW_PROFILE),
+                )
             else:
                 self._table.item(r, COL_PROGRESS).setData(Qt.ItemDataRole.UserRole, progress)
         if not active:
             self._timer.stop()
+        self._refresh_parse_activity()
 
     def _progress_of(self, row: int) -> int:
         value = self._table.item(row, COL_PROGRESS).data(Qt.ItemDataRole.UserRole)
         return int(value or 0)
 
-    def _submit_parse(self, row_id: str, path: str, force: bool = False) -> None:
+    def _submit_parse(self, row_id: str, path: str, force: bool = False,
+                      parse_profile: str = PARSE_SIMPLE) -> None:
         if self._worker is not None:
-            self._worker.submit(row_id, path, force)
+            self._worker.submit(row_id, path, force, parse_profile)
+
+    def _on_parse_started(self, row_id: str) -> None:
+        row = self._find_row(row_id)
+        if row is None:
+            return
+        self._table.item(row, COL_NAME).setData(_ROW_STATE, "parsing")
+        self._set_status(row, "info", "解析中...")
+        self._refresh_parse_activity()
+
+    def _refresh_parse_activity(self) -> None:
+        names = [self._table.item(row, COL_NAME) for row in range(self._table.rowCount())]
+        current = next((item for item in names if item.data(_ROW_STATE) == "parsing"), None)
+        waiting = sum(item.data(_ROW_STATE) == "queued" for item in names)
+        uploading = sum(item.data(_ROW_STATE) == "uploading" for item in names)
+        if current is not None:
+            profile = PARSE_PROFILE_LABELS[current.data(_ROW_PROFILE)]
+            text = f"正在解析：{current.text()}（{profile}）"
+            if waiting:
+                text += f" · 等待解析 {waiting} 个"
+        elif waiting:
+            text = f"等待开始解析 · 队列中 {waiting} 个文件"
+        elif uploading:
+            text = "正在准备文件…"
+        elif names:
+            text = "本次队列已处理完成，结果请查看各文件状态"
+        else:
+            text = "等待添加 PDF 文件"
+        if self._pending_uploads:
+            text += f" · 等待上传 {len(self._pending_uploads)} 个（每批 {UPLOAD_BATCH_SIZE} 个）"
+        self._parse_activity.setText(text)
 
     def _on_parse_done(self, row_id: str, status: str, reason: str, document_id: int) -> None:
+        self._active_batch.discard(row_id)
         row = self._find_row(row_id)
         if row is None:  # 行已被取消
+            self._start_next_upload_batch()
+            self._refresh_parse_activity()
             return
         kind = _STATUS_TO_KIND.get(status, "warning")
         text = {
@@ -372,6 +480,8 @@ class UploadPage(QWidget):
         }.get(status, status)
         self._table.item(row, COL_NAME).setData(_ROW_STATE, "done" if kind == "success" else "failed")
         self._set_status(row, kind, text)
+        self._start_next_upload_batch()
+        self._refresh_parse_activity()
         name = Path(self._table.item(row, COL_NAME).data(_ROW_PATH)).name
         tip = f"{name} · {text}：{reason}" if reason else f"{name} · {text}"
         self._table.item(row, COL_STATUS).setToolTip(tip)
@@ -428,10 +538,15 @@ class UploadPage(QWidget):
         if row is None:
             return
         state = self._table.item(row, COL_NAME).data(_ROW_STATE)
-        if state == "parsing":
-            self._toast.show_message("该文件正在解析，无法取消")
+        if state in ("queued", "parsing"):
+            self._toast.show_message("该文件已进入解析队列，无法取消" if state == "queued" else "该文件正在解析，无法取消")
             return
         self._table.removeRow(row)
+        if state == "waiting":
+            self._pending_uploads.remove(row_id)
+        self._active_batch.discard(row_id)
+        self._start_next_upload_batch()
+        self._refresh_parse_activity()
         if self._table.rowCount() == 0:
             self._timer.stop()
 
@@ -443,11 +558,13 @@ class UploadPage(QWidget):
                 self._table.removeRow(r)
                 removed += 1
         self._toast.show_message("已清理完成项" if removed else "没有可清理的完成项")
+        self._refresh_parse_activity()
 
     def _start_worker(self) -> None:
         self._worker_thread = QThread(self)
         self._worker = _ParseWorker(self._db_path)
         self._worker.moveToThread(self._worker_thread)
+        self._worker.task_started.connect(self._on_parse_started)
         self._worker.task_done.connect(self._on_parse_done)
         self._worker_thread.started.connect(self._worker.run)
         self._worker_thread.start()

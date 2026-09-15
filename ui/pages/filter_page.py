@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
 from ui.field_labels import field_label
 from ui.styles import STATUS_BADGE_CLASS, ui_font
 from ui.widgets.common import BadgeDelegate, CopyCellDelegate, Toast
+from pdf.parse_profiles import PARSE_SIMPLE, PARSE_DETAILED, PARSE_PROFILE_LABELS, SIMPLE_HIDDEN_FIELDS
+from services.parse_profile_service import load_parse_profiles
 
 # 数据列定义：(表头, 主字段, 回退字段(旧合同数据兼容), 默认宽度, 是否金额列)
 # 表头中文名统一取自 ui.field_labels（与详情弹窗共用一份映射，避免漂移）
@@ -148,6 +150,7 @@ class FilterPage(QWidget):
     def __init__(self, db_path: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._db_path = db_path
+        self._mode_hidden_columns: set[str] = set()
         self._toast = Toast(self)
         # 批量勾选（全选/取消全选）期间挂起"已选择 N 项"刷新，避免逐行触发 O(n²)
         self._suspend_select_count = False
@@ -180,6 +183,15 @@ class FilterPage(QWidget):
         self._month_filter.setMinimumWidth(120)
         self._month_filter.currentIndexChanged.connect(self.reload)
         bar_l.addWidget(self._month_filter)
+
+        self._profile_filter = QComboBox()
+        self._profile_filter.setAccessibleName("解析模式筛选")
+        self._profile_filter.addItem("全部解析模式", "")
+        for profile, label in PARSE_PROFILE_LABELS.items():
+            self._profile_filter.addItem(label, profile)
+        self._profile_filter.setCurrentIndex(self._profile_filter.findData(PARSE_SIMPLE))
+        self._profile_filter.currentIndexChanged.connect(self.reload)
+        bar_l.addWidget(self._profile_filter)
 
         query_btn = QPushButton("查询")
         query_btn.setProperty("cssClass", "btn-primary")
@@ -304,6 +316,7 @@ class FilterPage(QWidget):
         status = self._status_filter.currentData()
 
         with factory() as session:
+            profiles = load_parse_profiles(session)
             stmt = select(Document).order_by(Document.imported_at.desc())
             records = [
                 (doc.id, doc.file_name, {f.field_name: f.normalized_value for f in doc.fields}, doc.status)
@@ -317,7 +330,13 @@ class FilterPage(QWidget):
         month = self._month_filter.currentData() or ""
 
         rows = []
+        selected_profile = self._profile_filter.currentData()
         for doc_id, file_name, fields, doc_status in records:
+            profile = profiles.get(doc_id, PARSE_DETAILED)
+            if selected_profile and profile != selected_profile:
+                continue
+            if profile == PARSE_SIMPLE:
+                fields = {key: value for key, value in fields.items() if key not in SIMPLE_HIDDEN_FIELDS}
             if keywords:
                 hay = file_name.lower() + "\n" + "\n".join(
                     str(v).lower() for v in fields.values() if v
@@ -332,6 +351,11 @@ class FilterPage(QWidget):
                 continue
             rows.append((doc_id, file_name, fields))
 
+        simple_only = selected_profile == PARSE_SIMPLE or (
+            bool(rows) and all(profiles.get(doc_id, PARSE_DETAILED) == PARSE_SIMPLE for doc_id, _, _ in rows)
+        )
+        self._mode_hidden_columns = set(SIMPLE_HIDDEN_FIELDS) if simple_only else set()
+        self._apply_hidden_columns()
         self._table.setRowCount(0)
         for doc_id, file_name, fields in rows:
             self._append_row(doc_id, file_name, fields)
@@ -529,10 +553,14 @@ class FilterPage(QWidget):
         )
 
     def _apply_hidden_columns(self) -> None:
-        """启动时按持久化设置隐藏列。"""
-        hidden = self._hidden_columns()
+        """模式限制叠加手动隐藏设置，自动隐藏不写入用户偏好。"""
+        hidden = self._hidden_columns() | self._mode_hidden_columns
         for i, (_, key, _, _, _) in enumerate(DATA_COLUMNS):
             self._table.setColumnHidden(COL_DATA_START + i, key in hidden)
+            item = self._cols_model.item(i + 1)
+            item.setEnabled(key not in self._mode_hidden_columns)
+            item.setCheckState(Qt.CheckState.Unchecked if key in hidden else Qt.CheckState.Checked)
+        self._refresh_cols_text()
 
     def _build_cols_combo(self) -> QComboBox:
         """多选下拉：展开后连续勾选多项（下拉不收起），选择即时生效并持久化。"""
@@ -565,7 +593,8 @@ class FilterPage(QWidget):
             if self._cols_model.item(i + 1).checkState() == Qt.CheckState.Checked
         )
         self._cols_combo.setPlaceholderText(f"显示列 ({visible_n}/{len(DATA_COLUMNS)})")
-        self._cols_model.item(0).setText("全部隐藏" if visible_n == len(DATA_COLUMNS) else "全部显示")
+        available_n = sum(self._cols_model.item(i + 1).isEnabled() for i in range(len(DATA_COLUMNS)))
+        self._cols_model.item(0).setText("全部隐藏" if visible_n == available_n else "全部显示")
 
     def eventFilter(self, obj, event) -> bool:
         """勾选列表项鼠标松开时切换勾选，并吞掉该事件使下拉保持展开。"""
@@ -584,15 +613,16 @@ class FilterPage(QWidget):
                 show_all = any(
                     self._cols_model.item(i + 1).checkState() != Qt.CheckState.Checked
                     for i in range(len(DATA_COLUMNS))
+                    if self._cols_model.item(i + 1).isEnabled()
                 )
-                for i in range(len(DATA_COLUMNS)):
-                    self._cols_model.item(i + 1).setCheckState(
-                        Qt.CheckState.Checked if show_all else Qt.CheckState.Unchecked
-                    )
-                    self._table.setColumnHidden(COL_DATA_START + i, not show_all)
-                self._save_hidden_columns(set() if show_all else {key for _, key, _, _, _ in DATA_COLUMNS})
+                hidden = self._hidden_columns()
+                available = {key for _, key, _, _, _ in DATA_COLUMNS} - self._mode_hidden_columns
+                self._save_hidden_columns(hidden - available if show_all else hidden | available)
+                self._apply_hidden_columns()
             else:
                 item = self._cols_model.itemFromIndex(idx)
+                if not item.isEnabled():
+                    return True
                 data_row = idx.row() - 1  # 首项为功能项
                 on = item.checkState() != Qt.CheckState.Checked
                 item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
@@ -601,6 +631,8 @@ class FilterPage(QWidget):
         return True  # 阻止下拉收起
 
     def _set_column_visible(self, key: str, col: int, visible: bool) -> None:
+        if key in self._mode_hidden_columns:
+            return
         self._table.setColumnHidden(col, not visible)
         hidden = self._hidden_columns()
         if visible:
@@ -704,6 +736,7 @@ class FilterPage(QWidget):
 
         with factory() as session:
             stmt = select(Document).where(Document.id.in_(export_ids))
+            profiles = load_parse_profiles(session)
             # 导出跟随当前可见列（所见即所得）
             visible = [
                 (title, key, fallback)
@@ -726,6 +759,8 @@ class FilterPage(QWidget):
 
             for doc in session.scalars(stmt):
                 fields = {fd.field_name: fd.normalized_value for fd in doc.fields}
+                if profiles.get(doc.id) == PARSE_SIMPLE:
+                    fields = {key: value for key, value in fields.items() if key not in SIMPLE_HIDDEN_FIELDS}
                 row_values: list[object] = []
                 for _, key, fallback in visible:
                     v = fields.get(key) or (fields.get(fallback) if fallback else None)

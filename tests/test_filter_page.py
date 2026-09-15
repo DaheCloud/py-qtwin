@@ -37,6 +37,55 @@ def test_year_month_parses_common_formats():
     assert year_month("2026.09.09") == "2026-09"
 
 
+def test_columns_follow_parse_profiles(qt_app, tmp_path, monkeypatch):
+    import json
+    from database.db import get_engine, make_session_factory
+    from models.document import AuditLog, Document, ExtractedField
+    from pdf.parse_profiles import SIMPLE_HIDDEN_FIELDS
+    from ui.pages.filter_page import FilterPage, DATA_COLUMNS, COL_DATA_START
+
+    hidden = set()
+    monkeypatch.setattr(FilterPage, "_hidden_columns", lambda self: set(hidden))
+    monkeypatch.setattr(FilterPage, "_save_hidden_columns", lambda self, value: (hidden.clear(), hidden.update(value)))
+    page = _make_page(tmp_path / "profiles.db", (("simple.pdf", "success"), ("detailed.pdf", "success")))
+    with make_session_factory(get_engine(tmp_path / "profiles.db"))() as session:
+        simple = session.query(Document).filter_by(file_name="simple.pdf").one()
+        session.add(AuditLog(document_id=simple.id, action="process", detail='status=success ' + json.dumps({"parse": {"profile": "simple"}})))
+        # 兼容早期简化记录中仍保存的建筑信息。
+        session.add(ExtractedField(document_id=simple.id, field_name="construction_site", normalized_value="旧建筑信息"))
+        session.commit()
+    columns = {key: COL_DATA_START + i for i, (_, key, _, _, _) in enumerate(DATA_COLUMNS)}
+    try:
+        page.reload()
+        assert not page._table.isColumnHidden(columns["construction_site"])
+        assert page._table.item(_row_of(page, "simple.pdf"), columns["construction_site"]).text() == "—"
+
+        page._profile_filter.setCurrentIndex(page._profile_filter.findData("simple"))
+        assert page._table.rowCount() == 1
+        for key, col in columns.items():
+            assert page._table.isColumnHidden(col) == (key in SIMPLE_HIDDEN_FIELDS)
+        assert not hidden  # 自动隐藏不污染手动偏好
+        page._set_column_visible("construction_site", columns["construction_site"], True)
+        assert page._table.isColumnHidden(columns["construction_site"])
+        page._set_column_visible("buyer_name", columns["buyer_name"], False)
+
+        page._profile_filter.setCurrentIndex(page._profile_filter.findData("detailed"))
+        assert page._table.rowCount() == 1
+        assert not page._table.isColumnHidden(columns["construction_site"])
+        assert page._table.isColumnHidden(columns["buyer_name"])
+
+        page._profile_filter.setCurrentIndex(0)
+        page._search.setText("simple.pdf")
+        page.reload()
+        assert page._table.isColumnHidden(columns["project_name"])
+        page._search.setText("不存在")
+        page._profile_filter.setCurrentIndex(page._profile_filter.findData("simple"))
+        assert page._table.rowCount() == 0
+        assert page._table.isColumnHidden(columns["project_name"])
+    finally:
+        page.close()
+
+
 def test_year_month_rejects_unparsable():
     assert year_month(None) == ""
     assert year_month("") == ""
@@ -104,7 +153,11 @@ def _make_page(db_path, docs=()) -> object:
                     )
                 )
             session.commit()
-    return FilterPage(str(db_path))
+    page = FilterPage(str(db_path))
+    assert page._profile_filter.currentData() == "simple"
+    # 通用列表用例查看全部记录；页面实际默认筛选简化解析。
+    page._profile_filter.setCurrentIndex(0)
+    return page
 
 
 @pytest.fixture

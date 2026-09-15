@@ -447,6 +447,8 @@ class DetailDialog(QDialog):
         """从 DB 拉取字段与验证结果，并加载 PDF 预览（确认操作后重建）。"""
         from database.db import get_engine, make_session_factory
         from models.document import Document
+        from pdf.parse_profiles import PARSE_SIMPLE, SIMPLE_HIDDEN_FIELDS
+        from services.parse_profile_service import load_parse_profiles
 
         engine = get_engine(self._db_path)
         factory = make_session_factory(engine)
@@ -464,6 +466,7 @@ class DetailDialog(QDialog):
             error_reason = doc.error_reason
             identify_confidence = doc.identify_confidence
             parse_confidence = doc.parse_confidence
+            simple = load_parse_profiles(session, doc.id).get(doc.id) == PARSE_SIMPLE
             fields = [
                 (
                     f.field_name,
@@ -476,10 +479,12 @@ class DetailDialog(QDialog):
                     bool(f.fallback_used),
                 )
                 for f in doc.fields
+                if not simple or f.field_name not in SIMPLE_HIDDEN_FIELDS
             ]
             verifications = [
                 (v.field_name, v.primary_value, v.secondary_value, v.matched, v.review_status)
                 for v in doc.verifications
+                if not simple or v.field_name not in SIMPLE_HIDDEN_FIELDS
             ]
             # 明细行（Table Engine 重建结果，方案 §15）：按行展示，便于对照 PDF 核对
             items = [
@@ -495,6 +500,7 @@ class DetailDialog(QDialog):
                     it.tax,
                 )
                 for it in doc.items
+                if not simple
             ]
             pdf_path = doc.file_path
 

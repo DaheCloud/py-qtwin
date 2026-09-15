@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QStackedWidget
 
 from ui.pages.filter_page import FilterPage
@@ -56,12 +57,26 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # 页面联动
-        self._upload_page.database_changed.connect(self._filter_page.reload)
+        self._filter_refresh_timer = QTimer(self)
+        self._filter_refresh_timer.setSingleShot(True)
+        self._filter_refresh_timer.setInterval(300)
+        self._filter_refresh_timer.timeout.connect(self._refresh_visible_filter)
+        self._upload_page.database_changed.connect(self._on_database_changed)
         self._filter_page.detail_requested.connect(self._open_detail)
 
     # ------------------------------------------------------------------
 
+    def _on_database_changed(self) -> None:
+        """上传页只更新任务状态，避免隐藏的数据列表重建阻塞界面。"""
+        if self._stack.currentWidget() is self._filter_page:
+            self._filter_refresh_timer.start()
+
+    def _refresh_visible_filter(self) -> None:
+        if self._stack.currentWidget() is self._filter_page:
+            self._filter_page.reload()
+
     def _switch_page(self, key: str) -> None:
+        self._filter_refresh_timer.stop()
         index = {"upload": 0, "editor": 1, "filter": 2, "settings": 3}.get(key, 0)
         self._stack.setCurrentIndex(index)
         if key == "filter":
@@ -79,6 +94,7 @@ class MainWindow(QMainWindow):
 
     def shutdown(self) -> None:
         """停止后台解析线程；必须在窗口对象被销毁前调用。"""
+        self._filter_refresh_timer.stop()
         self._upload_page.shutdown()
 
     def closeEvent(self, event) -> None:  # noqa: N802

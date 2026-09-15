@@ -56,6 +56,7 @@ from pdf.evidence.scorer import FIELD_MEDIUM, FieldScore
 from pdf.policies import FALLBACK_ANCHOR, field_fallback_policy
 from pdf.pdfplumber_validator import PdfplumberValidator
 from pdf.precheck import precheck_document
+from pdf.parse_profiles import PARSE_DETAILED, PARSE_PROFILE_LABELS, apply_parse_profile
 from pdf.pymupdf_parser import FixedRegionParser
 from pdf.template_engine import IdentifyResult, TemplateEngine
 from pdf.table_engine import table_score as calculate_table_score
@@ -444,6 +445,7 @@ class PdfService:
         *,
         force: bool = False,
         cross_verify: bool | None = None,
+        parse_profile: str = PARSE_DETAILED,
     ) -> Document:
         """完整处理一份 PDF；document + fields + items + verifications 同一事务。
 
@@ -453,10 +455,15 @@ class PdfService:
         cross_verify：双引擎交叉验证的开关（None=按风险自动触发，即 Lazy Cross
         Validation；True=强制执行；False=跳过）。
 
+        parse_profile：simple 仅基本信息与合计；detailed 保留完整明细解析。
+        服务接口默认 detailed 兼容已有调用，上传页默认选择 simple。
+
         模板选择：显式传入 template 视为人工指定（identify.mode=manual，置信度按
         高置信处理）；否则自动识别——专属模板按指纹打分取最高分；全部淘汰落到
         通用兜底模板；连兜底都不适用才报错提示手动选择。
         """
+        if parse_profile not in PARSE_PROFILE_LABELS:
+            raise ValueError(f"不支持的解析模式：{parse_profile}")
         pdf_path = str(Path(pdf_path).resolve())
         file_hash = file_sha256(pdf_path)
 
@@ -478,7 +485,7 @@ class PdfService:
                 file_hash,
                 reason=f"PDF 无法打开（可能已损坏）：{precheck.error}",
                 code="PDF_BROKEN",
-                payload={"precheck": precheck.as_dict()},
+                payload={"precheck": precheck.as_dict(), "parse_profile": parse_profile},
             )
         if precheck.needs_ocr:
             return self._fail_document(
@@ -487,7 +494,7 @@ class PdfService:
                 file_hash,
                 reason="PDF 无文本层（疑似扫描件），已挂起等待 OCR 后重新解析",
                 code="NEEDS_OCR",
-                payload={"precheck": precheck.as_dict()},
+                payload={"precheck": precheck.as_dict(), "parse_profile": parse_profile},
                 status=STATUS_NEEDS_OCR,
             )
 
@@ -504,7 +511,7 @@ class PdfService:
             )
         if identify.template is None:
             raise ValueError("未识别到可用模板，请手动选择模板")
-        template = identify.template
+        template = apply_parse_profile(identify.template, parse_profile)
         match_kind = identify.mode
 
         doc = Document(
@@ -744,6 +751,7 @@ class PdfService:
                 "identify": identify.as_dict(),
                 "precheck": precheck.as_dict(),
                 "parse": {
+                    "profile": parse_profile,
                     "engine": "pymupdf",
                     "template_mode": template.get("mode"),
                     "field_success": sum(1 for f in report.fields.values() if f.valid),
